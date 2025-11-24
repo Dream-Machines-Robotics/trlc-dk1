@@ -151,7 +151,7 @@ lerobot-teleoperate \
 </details>
 
 <details>
-<summary>Bimanual Teleoperation
+<summary>Bimanual Recording
 </summary>
 
 ```bash
