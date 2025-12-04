@@ -5,11 +5,11 @@ import time
 
 follower_config = DK1FollowerConfig(
     port="/dev/tty.usbmodem00000000050C1",
-    joint_velocity_scaling=1.0,
+    joint_velocity_scaling=0.2,
 )
 
 leader_config = DK1LeaderConfig(
-    port="/dev/tty.usbmodem58FA0824311"
+    port="/dev/tty.usbmodem5A680096411"
 )
 
 leader = DK1Leader(leader_config)
