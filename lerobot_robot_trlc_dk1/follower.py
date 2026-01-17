@@ -25,7 +25,7 @@ from lerobot.robots import Robot, RobotConfig
 from lerobot.robots.utils import ensure_safe_goal_position
 from lerobot.utils.errors import DeviceAlreadyConnectedError, DeviceNotConnectedError
 
-from trlc_dk1.motors.DM_Control_Python.DM_CAN import *
+from lerobot_robot_trlc_dk1.motors.DM_Control_Python.DM_CAN import *
 
 logger = logging.getLogger(__name__)
 

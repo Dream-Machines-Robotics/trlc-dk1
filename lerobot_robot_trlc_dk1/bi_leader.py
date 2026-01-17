@@ -16,7 +16,7 @@ from dataclasses import dataclass
 import logging
 from lerobot.teleoperators.teleoperator import Teleoperator, TeleoperatorConfig
 
-from trlc_dk1.leader import DK1Leader, DK1LeaderConfig
+from lerobot_robot_trlc_dk1.leader import DK1Leader, DK1LeaderConfig
 
 logger = logging.getLogger(__name__)
 

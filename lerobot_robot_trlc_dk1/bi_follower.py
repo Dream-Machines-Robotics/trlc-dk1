@@ -22,8 +22,8 @@ from lerobot.cameras import CameraConfig
 from lerobot.cameras.utils import make_cameras_from_configs
 from lerobot.robots import Robot, RobotConfig
 
-from trlc_dk1.motors.DM_Control_Python.DM_CAN import *
-from trlc_dk1.follower import DK1Follower, DK1FollowerConfig
+from lerobot_robot_trlc_dk1.motors.DM_Control_Python.DM_CAN import *
+from lerobot_robot_trlc_dk1.follower import DK1Follower, DK1FollowerConfig
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
