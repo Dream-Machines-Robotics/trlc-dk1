@@ -46,12 +46,12 @@ class DK1Leader(Teleoperator):
         self.bus = DynamixelMotorsBus(
             port=self.config.port,
             motors={
-                "joint_1": Motor(1, "xl330-m077", MotorNormMode.DEGREES),
-                "joint_2": Motor(2, "xl330-m077", MotorNormMode.DEGREES),
+                "joint_1": Motor(1, "xl330-m288", MotorNormMode.DEGREES),
+                "joint_2": Motor(2, "xl330-m288", MotorNormMode.DEGREES),
                 "joint_3": Motor(3, "xl330-m077", MotorNormMode.DEGREES),
                 "joint_4": Motor(4, "xl330-m077", MotorNormMode.DEGREES),
-                "joint_5": Motor(5, "xl330-m077", MotorNormMode.DEGREES),
-                "joint_6": Motor(6, "xl330-m077", MotorNormMode.DEGREES),
+                "joint_5": Motor(5, "xl330-m288", MotorNormMode.DEGREES),
+                "joint_6": Motor(6, "xl330-m288", MotorNormMode.DEGREES),
                 "gripper": Motor(7, "xl330-m077", MotorNormMode.DEGREES),
             },
         )
@@ -107,7 +107,7 @@ class DK1Leader(Teleoperator):
 
         start = time.perf_counter()
         
-        action = self.bus.sync_read(normalize=False, data_name="Present_Position")
+        action = self.bus.sync_read(normalize=False, data_name="Present_Position", num_retry=2)
         action = {f"{motor}.pos": (val/4096*2*np.pi-np.pi) if motor != "gripper" else val for motor, val in action.items()}
         
         # # Normalize gripper position between 1 (closed) and 0 (open)

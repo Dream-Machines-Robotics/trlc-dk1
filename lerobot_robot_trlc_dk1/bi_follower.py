@@ -26,7 +26,6 @@ from lerobot_robot_trlc_dk1.motors.DM_Control_Python.DM_CAN import *
 from lerobot_robot_trlc_dk1.follower import DK1Follower, DK1FollowerConfig
 
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)
 
 
 def map_range(x: float, in_min: float, in_max: float, out_min: float, out_max: float) -> float:
@@ -42,6 +41,8 @@ class BiDK1FollowerConfig(RobotConfig):
     joint_velocity_scaling: float = 0.2
     max_gripper_torque: float = 1.0 # Nm (/0.00875m spur gear radius = 114N gripper force)
     cameras: dict[str, CameraConfig] = field(default_factory=dict)
+    # Control mode: "pos_vel" (Python serial) or "rt_impedance" (C++ RT loop at 250Hz)
+    control_mode: str = "rt_impedance"
 
 
 class BiDK1Follower(Robot):
@@ -62,12 +63,14 @@ class BiDK1Follower(Robot):
             disable_torque_on_disconnect=self.config.disable_torque_on_disconnect,
             joint_velocity_scaling=self.config.joint_velocity_scaling,
             max_gripper_torque=self.config.max_gripper_torque,
+            control_mode=self.config.control_mode,
         )
         right_arm_config = DK1FollowerConfig(
             port=self.config.right_arm_port,
             disable_torque_on_disconnect=self.config.disable_torque_on_disconnect,
             joint_velocity_scaling=self.config.joint_velocity_scaling,
             max_gripper_torque=self.config.max_gripper_torque,
+            control_mode=self.config.control_mode,
         )
         
         self.left_arm = DK1Follower(left_arm_config)
@@ -102,8 +105,14 @@ class BiDK1Follower(Robot):
         self.left_arm.connect()
         self.right_arm.connect()
 
-        for cam in self.cameras.values():
-            cam.connect()
+        try:
+            for cam in self.cameras.values():
+                cam.connect()
+        except Exception:
+            # Clean up RT loops if camera connection fails
+            self.left_arm.disconnect()
+            self.right_arm.disconnect()
+            raise
 
     @property
     def is_calibrated(self) -> bool:
@@ -127,7 +136,10 @@ class BiDK1Follower(Robot):
 
         for cam_key, cam in self.cameras.items():
             start = time.perf_counter()
-            obs_dict[cam_key] = cam.async_read()
+            # Use read_latest() to avoid blocking when loop runs faster than camera FPS.
+            # This returns the most recent frame immediately (~0ms) instead of waiting
+            # for a new frame (~33ms at 30fps). Critical for 50fps dataset with 30fps cameras.
+            obs_dict[cam_key] = cam.read_latest()
             dt_ms = (time.perf_counter() - start) * 1e3
             logger.debug(f"{self} read {cam_key}: {dt_ms:.1f}ms")
 

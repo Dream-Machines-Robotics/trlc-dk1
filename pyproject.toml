@@ -1,6 +1,6 @@
 [build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
+requires = ["scikit-build-core>=0.10", "nanobind>=2.4", "mujoco>=3.0.0"]
+build-backend = "scikit_build_core.build"
 
 [project]
 name = "lerobot_robot_trlc_dk1"
@@ -10,7 +10,7 @@ dependencies = [
   "numpy>=2.0.1",
   "pyserial>=3.5",
   "dynamixel-sdk>=3.7.31",
-  "lerobot@https://github.com/huggingface/lerobot.git",
+  "mujoco>=3.0.0",
 ]
 
 authors = [
@@ -20,9 +20,13 @@ maintainers = [
   {name = "Jannik Grothusen", email = "jannik@robot-learning.co"},
 ]
 
+[project.optional-dependencies]
+rt = []  # C++ extension is built by scikit-build-core when installed
+
 [project.urls]
 Homepage = "https://www.robot-learning.co/"
 Documentation = "https://www.docs.robot-learning.co/"
 
-[tool.hatch.metadata]
-allow-direct-references = true
+[tool.scikit-build]
+cmake.source-dir = "csrc"
+cmake.build-type = "Release"

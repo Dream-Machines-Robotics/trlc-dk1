@@ -1,8 +1,11 @@
+import logging
 from time import sleep
 import numpy as np
 from enum import IntEnum
 from struct import unpack
 from struct import pack
+
+_dm_logger = logging.getLogger(__name__)
 
 
 class Motor:
@@ -83,7 +86,7 @@ class MotorControl:
         self.motors_map = dict()
         self.data_save = bytes()  # save data
         if self.serial_.is_open:  # open the serial port
-            print("Serial port is open")
+            _dm_logger.debug("Serial port is open")
             serial_device.close()
         self.serial_.open()
 
