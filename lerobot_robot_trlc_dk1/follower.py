@@ -140,11 +140,15 @@ class DK1Follower(Robot):
             serial_port=self.config.port,
             disable_torque_on_disconnect=self.config.disable_torque_on_disconnect,
             max_gripper_torque_nm=self.config.max_gripper_torque,
+            joint_velocity_scaling=self.config.joint_velocity_scaling,
         )
         self._rt_robot = DK1RobotRT(rt_config)
         self._rt_robot.connect()
         self.bus_connected = True
-        logger.info(f"{self} connected via C++ RT control loop")
+        logger.info(
+            f"{self} connected via C++ RT control loop "
+            f"(joint_velocity_scaling={self.config.joint_velocity_scaling})"
+        )
 
     @property
     def is_calibrated(self) -> bool:

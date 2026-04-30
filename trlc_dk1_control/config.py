@@ -84,6 +84,12 @@ class DK1RobotConfig:
         default_factory=lambda: np.array([0.02, 0.02, 0.02, 0.06, 0.06, 0.06])
     )
 
+    # Multiplier applied to joint_velocity_limits and max_pos_delta_per_cycle when the
+    # config is fed into the C++ RT loop. Lets the operator dial down speed at runtime
+    # (e.g. for first-run policy eval) without editing the per-joint defaults above.
+    # Range (0, 1]. Values outside this range are clamped at the call site.
+    joint_velocity_scaling: float = 1.0
+
     # Safety watchdog
     command_timeout_s: float = 0.5    # hold position (damping only) after this idle period
     overcurrent_threshold: int = 20   # consecutive over-limit torque counts before damping

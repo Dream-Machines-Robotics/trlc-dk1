@@ -81,8 +81,20 @@ class DK1RobotRT:
         rt_cfg.joint_pos_limits = limits.flatten()
 
         rt_cfg.joint_torque_limits = np.asarray(config.joint_torque_limits, dtype=np.float64)
-        rt_cfg.joint_velocity_limits = np.asarray(config.joint_velocity_limits, dtype=np.float64)
-        rt_cfg.max_pos_delta_per_cycle = np.asarray(config.max_pos_delta_per_cycle, dtype=np.float64)
+
+        # Apply joint_velocity_scaling to both the velocity limit (rad/s, used by the
+        # overspeed watchdog) and the per-cycle slew limit (rad/cycle, used by the
+        # impedance loop's position ramp). Without this, the Makefile's
+        # JOINT_VELOCITY_SCALING knob silently does nothing in RT mode.
+        vel_scale = float(np.clip(config.joint_velocity_scaling, 1e-3, 1.0))
+        if vel_scale != 1.0:
+            logger.info(
+                "DK1RobotRT: joint_velocity_scaling=%.3f → scaling joint_velocity_limits "
+                "and max_pos_delta_per_cycle by the same factor.",
+                vel_scale,
+            )
+        rt_cfg.joint_velocity_limits = np.asarray(config.joint_velocity_limits, dtype=np.float64) * vel_scale
+        rt_cfg.max_pos_delta_per_cycle = np.asarray(config.max_pos_delta_per_cycle, dtype=np.float64) * vel_scale
         rt_cfg.limit_buffer = 0.05
 
         # Gravity compensation
