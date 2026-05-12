@@ -203,6 +203,33 @@ class DK1Follower(Robot):
         self.control.switchControlMode(
             self.motors["gripper"], Control_Type.Torque_Pos)
 
+    def get_joint_torques(self) -> dict[str, float]:
+        """Per-motor torque readings (Nm), straight from the RT loop.
+
+        NOT in ``observation_features`` on purpose: this is a side-channel
+        for runtime UX (haptic feedback), not for dataset recording — adding
+        torque keys to the schema would break policies trained without
+        them. Returns ``{}`` outside RT mode (the Python serial path
+        doesn't surface torque cheaply).
+
+        v1 returns only the gripper torque. Arm joint torques are also
+        available from ``_rt_robot.get_joint_state()["torque"]`` but are
+        gravity-comp dominated at rest, which makes them unsuitable for
+        "is something pushing on the arm" UX without subtracting the
+        gravity model.
+        """
+        if self._rt_robot is None:
+            return {}
+        gripper_state = self._rt_robot.get_gripper_state()
+        # `pos` (normalized 0..1, 0=open / 1=closed) is included alongside
+        # the torque so downstream consumers can compute a numerical
+        # velocity and subtract the inertia/kinetic-friction component
+        # from the haptic intensity. Cheap to ship; ignored if not used.
+        return {
+            "gripper.torque": float(gripper_state["torque"]),
+            "gripper.pos":    float(gripper_state["pos"]),
+        }
+
     def get_observation(self) -> dict[str, Any]:
         if not self.is_connected:
             raise DeviceNotConnectedError(f"{self} is not connected.")

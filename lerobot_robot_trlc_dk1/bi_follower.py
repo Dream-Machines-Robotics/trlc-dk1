@@ -125,9 +125,19 @@ class BiDK1Follower(Robot):
         self.left_arm.configure()
         self.right_arm.configure()
 
+    def get_joint_torques(self) -> dict[str, float]:
+        """Per-arm torque side-channel for haptic feedback. Mirrors
+        ``DK1Follower.get_joint_torques`` with ``left_/right_`` prefixes."""
+        out: dict[str, float] = {}
+        for key, val in self.left_arm.get_joint_torques().items():
+            out[f"left_{key}"] = val
+        for key, val in self.right_arm.get_joint_torques().items():
+            out[f"right_{key}"] = val
+        return out
+
     def get_observation(self) -> dict[str, Any]:
         obs_dict = {}
-        
+
         left_obs = self.left_arm.get_observation()
         obs_dict.update({f"left_{key}": value for key, value in left_obs.items()})
 
