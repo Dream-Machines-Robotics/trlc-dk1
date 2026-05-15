@@ -14,6 +14,7 @@
 
 from dataclasses import dataclass
 import logging
+import os
 import time
 import numpy as np
 
@@ -26,6 +27,31 @@ from lerobot.motors.dynamixel import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Hardware revision selector — "new" (default) matches the current shipping
+# leader (mixed xl330-m288/m077 → motor models 1200/1190). "old" matches the
+# earlier leader where every joint is xl330-m077 (all 1190). Set via the
+# LEADER_HW_REV env var; the Makefile exports it from `make.local`.
+_HW_REV_MOTORS = {
+    "new": {
+        "joint_1": ("xl330-m288", 1),
+        "joint_2": ("xl330-m288", 2),
+        "joint_3": ("xl330-m077", 3),
+        "joint_4": ("xl330-m077", 4),
+        "joint_5": ("xl330-m288", 5),
+        "joint_6": ("xl330-m288", 6),
+        "gripper": ("xl330-m077", 7),
+    },
+    "old": {
+        "joint_1": ("xl330-m077", 1),
+        "joint_2": ("xl330-m077", 2),
+        "joint_3": ("xl330-m077", 3),
+        "joint_4": ("xl330-m077", 4),
+        "joint_5": ("xl330-m077", 5),
+        "joint_6": ("xl330-m077", 6),
+        "gripper": ("xl330-m077", 7),
+    },
+}
 
 
 @TeleoperatorConfig.register_subclass("dk1_leader")
@@ -43,16 +69,16 @@ class DK1Leader(Teleoperator):
     def __init__(self, config: DK1LeaderConfig):
         super().__init__(config)
         self.config = config
+        hw_rev = os.environ.get("LEADER_HW_REV", "new").strip().lower()
+        if hw_rev not in _HW_REV_MOTORS:
+            raise ValueError(
+                f"LEADER_HW_REV must be one of {sorted(_HW_REV_MOTORS)}, got {hw_rev!r}"
+            )
         self.bus = DynamixelMotorsBus(
             port=self.config.port,
             motors={
-                "joint_1": Motor(1, "xl330-m288", MotorNormMode.DEGREES),
-                "joint_2": Motor(2, "xl330-m288", MotorNormMode.DEGREES),
-                "joint_3": Motor(3, "xl330-m077", MotorNormMode.DEGREES),
-                "joint_4": Motor(4, "xl330-m077", MotorNormMode.DEGREES),
-                "joint_5": Motor(5, "xl330-m288", MotorNormMode.DEGREES),
-                "joint_6": Motor(6, "xl330-m288", MotorNormMode.DEGREES),
-                "gripper": Motor(7, "xl330-m077", MotorNormMode.DEGREES),
+                name: Motor(motor_id, model, MotorNormMode.DEGREES)
+                for name, (model, motor_id) in _HW_REV_MOTORS[hw_rev].items()
             },
         )
 
