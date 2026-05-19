@@ -728,8 +728,8 @@ void RtControlLoop::rt_thread_func() {
             state_seq_.store(s + 2, std::memory_order_release);
         }
 
-        // 3b. Also push to the timestamped ring (Option C alignment). Single
-        //     producer (this RT thread), multiple readers (Python).
+        // 3b. Also push to the timestamped state ring (used by get_state_at).
+        //     Single producer (this RT thread), multiple readers (Python).
         //     The release-store of write_idx makes the slot's fields visible
         //     to any reader that observes the new index; readers verify they
         //     weren't lapped by re-reading write_idx after copying the slot.

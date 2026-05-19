@@ -154,7 +154,7 @@ NB_MODULE(_trlc_dk1_rt, m) {
         .def_ro("pos", &GripperState::pos)
         .def_ro("torque", &GripperState::torque);
 
-    // TimedJointSnapshot — used by get_state_at() for Option C alignment.
+    // TimedJointSnapshot — returned by get_state_at() for time-aligned reads.
     nb::class_<TimedJointSnapshot>(m, "TimedJointSnapshot")
         .def_ro("ts_mono_ns", &TimedJointSnapshot::ts_mono_ns)
         .def_ro("joints", &TimedJointSnapshot::joints)

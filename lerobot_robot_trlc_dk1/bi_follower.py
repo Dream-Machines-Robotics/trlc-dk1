@@ -59,19 +59,14 @@ class BiDK1Follower(Robot):
 
         self.config = config
 
-        # Option C alignment toggle. Default ON; set LEROBOT_OBS_ALIGN=0 in the
-        # environment to disable and fall back to "latest of everything per
-        # tick" semantics (matches upstream LeRobot behaviour but produces noisy
-        # labels under rate-aliasing and transient stalls). See SPEC.md for the
-        # trade-off analysis.
-        _align_env = os.environ.get("LEROBOT_OBS_ALIGN", "1").strip().lower()
-        self._align_observations = _align_env not in ("0", "false", "no", "off")
-        if not self._align_observations:
-            logger.warning(
-                "BiDK1Follower: LEROBOT_OBS_ALIGN=%r — Option C alignment DISABLED; "
-                "observations will use latest-of-everything semantics.",
-                _align_env,
-            )
+        # Observation-alignment toggle. Default OFF (matches upstream LeRobot
+        # "latest-of-everything-per-tick" semantics). Set LEROBOT_OBS_ALIGN=1 in
+        # the environment to instead pick a reference time T (= newest camera
+        # kernel capture timestamp) and source motor + leader state from T, so
+        # every dataset row contains a self-consistent (image, motors, action)
+        # triple at the cost of one camera period of inherent latency.
+        _align_env = os.environ.get("LEROBOT_OBS_ALIGN", "0").strip().lower()
+        self._align_observations = _align_env in ("1", "true", "yes", "on")
 
         left_arm_config = DK1FollowerConfig(
             port=self.config.left_arm_port,
@@ -178,22 +173,22 @@ class BiDK1Follower(Robot):
         }
 
     def get_observation(self) -> dict[str, Any]:
-        """Return a single dict of all sensors, aligned in time when possible.
+        """Return a single dict of all sensors, optionally time-aligned.
 
-        Option C: when every bi-follower camera exposes ``latest_capture_time_ns``
-        (true for the cpp backend, false for opencv), we pick a reference time
-        ``T`` = the newest camera frame's kernel capture timestamp and ask every
-        other sensor — motors via the RT loop's state ring, per-arm cameras —
-        for state at-or-before ``T``. The dataset row therefore contains a
-        physically-self-consistent snapshot from ~1 camera period in the past,
-        instead of "latest of everything at tick time" (which can drift apart
-        during Python catch-up).
+        When ``self._align_observations`` is True *and* every bi-follower
+        camera exposes ``latest_capture_time_ns`` (true for the cpp backend,
+        false for opencv), we pick a reference time ``T`` = the newest camera
+        frame's kernel capture timestamp and ask every other sensor — motors
+        via the RT loop's state ring, per-arm cameras — for state at-or-before
+        ``T``. The dataset row then contains a self-consistent snapshot from
+        ~1 camera period in the past, instead of "latest of everything at tick
+        time" (which can drift apart during Python catch-up).
 
         The chosen ``T`` is stashed on ``self._last_observation_ref_ts_ns`` so
         the recording loop can use it to align the leader teleop snapshot too.
 
-        When alignment isn't available (e.g. CAM_BACKEND=opencv), falls back
-        to the legacy latest semantics.
+        When alignment is disabled, or when a camera doesn't carry kernel
+        timestamps, falls back to legacy latest semantics on every read.
         """
         # Pick the reference time T — newest camera kernel capture timestamp
         # across all bi-follower cameras. If any camera lacks the API or has

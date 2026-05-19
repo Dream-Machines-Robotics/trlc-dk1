@@ -235,7 +235,7 @@ class DK1Follower(Robot):
 
         When ``ref_ts_ns`` is given and the RT loop's state ring contains a
         sample at-or-before it, the motor readings are sourced from that
-        sample (Option C: timestamp-aligned observation). The cameras are
+        sample (timestamp-aligned observation). The cameras are
         likewise asked for their frame at-or-before ``ref_ts_ns`` when they
         support ``read_at_or_before``. Any alignment failure falls back to
         the legacy latest-of-everything behavior — never raises.
@@ -255,7 +255,7 @@ class DK1Follower(Robot):
             if ref_ts_ns is not None:
                 aligned = self._rt_robot.get_state_at(ref_ts_ns)
             if aligned is not None:
-                # Option C: aligned read from the ring.
+                # Aligned read: sample from the state ring at-or-before ref_ts_ns.
                 joint_pos = aligned["joint_pos"]
                 gripper_pos = aligned["gripper_pos"]
                 # Normalize gripper_pos to [0, 1] like the latest API does. The

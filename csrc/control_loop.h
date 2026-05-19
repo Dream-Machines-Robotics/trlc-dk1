@@ -149,7 +149,7 @@ public:
     // at-or-before `ts_ns` is available (target time predates the oldest
     // still-buffered slot, or no samples have been published yet).
     //
-    // Used by timestamp-aligned observation assembly (Option C): the record /
+    // Used by timestamp-aligned observation assembly: the record /
     // rollout loop picks the latest camera frame's kernel capture timestamp
     // as the reference T and asks every other sensor for its state at T.
     bool get_state_at(uint64_t ts_ns, TimedJointSnapshot& out) const;
