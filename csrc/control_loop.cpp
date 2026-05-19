@@ -196,6 +196,61 @@ GripperState RtControlLoop::get_gripper_state() const {
     return result;
 }
 
+bool RtControlLoop::get_state_at(uint64_t ts_ns, TimedJointSnapshot& out) const {
+    // Lock-free, single-producer / multi-consumer ring read.
+    //
+    // The RT thread (producer) writes a slot and then release-stores the new
+    // write_idx. Readers acquire-load write_idx, scan slots from newest to
+    // oldest looking for one with ts_mono_ns <= ts_ns, copy out, then re-load
+    // write_idx to verify the slot they read wasn't overwritten between the
+    // first load and the copy. If the slot was lapped (new_idx - found_idx
+    // > STATE_RING_SIZE), retry up to a few times.
+    constexpr int MAX_ATTEMPTS = 4;
+    for (int attempt = 0; attempt < MAX_ATTEMPTS; ++attempt) {
+        const uint64_t idx = state_ring_write_idx_.load(std::memory_order_acquire);
+        if (idx == 0) return false;
+        const size_t scan = std::min<size_t>(STATE_RING_SIZE, idx);
+        size_t found_slot = 0;
+        uint64_t found_slot_idx = 0;
+        bool found = false;
+        for (size_t i = 0; i < scan; ++i) {
+            const uint64_t slot_idx = idx - 1 - i;
+            const RingSlot& s = state_ring_[slot_idx % STATE_RING_SIZE];
+            if (s.ts_mono_ns <= ts_ns) {
+                out.ts_mono_ns = s.ts_mono_ns;
+                for (int j = 0; j < 6; ++j) {
+                    out.joints.pos[static_cast<size_t>(j)] = s.pos[static_cast<size_t>(j)];
+                    out.joints.vel[static_cast<size_t>(j)] = s.vel[static_cast<size_t>(j)];
+                    out.joints.torque[static_cast<size_t>(j)] = s.torque[static_cast<size_t>(j)];
+                }
+                // Gripper: normalize to [0, 1] like get_gripper_state() does,
+                // for consistency with the legacy "latest" API.
+                double gpos = s.pos[6];
+                const double range = cfg_.gripper_closed_pos - gripper_open_pos_;
+                if (std::abs(range) > 1e-6) {
+                    gpos = std::clamp((gpos - gripper_open_pos_) / range, 0.0, 1.0);
+                }
+                out.gripper.pos = gpos;
+                out.gripper.torque = s.torque[6];
+                found_slot = slot_idx % STATE_RING_SIZE;
+                (void)found_slot;
+                found_slot_idx = slot_idx;
+                found = true;
+                break;
+            }
+        }
+        if (!found) return false;
+
+        // Verify the slot we copied wasn't overwritten while we were reading it.
+        const uint64_t new_idx = state_ring_write_idx_.load(std::memory_order_acquire);
+        if (new_idx - found_slot_idx <= STATE_RING_SIZE) {
+            return true;  // slot still in-ring
+        }
+        // Otherwise the producer lapped us. Retry.
+    }
+    return false;  // gave up after MAX_ATTEMPTS races
+}
+
 HealthState RtControlLoop::get_health() const {
     HealthState result;
     for (int attempt = 0; attempt < 100; ++attempt) {
@@ -671,6 +726,21 @@ void RtControlLoop::rt_thread_func() {
             state_buf_.vel = cur_vel;
             state_buf_.torque = cur_torque;
             state_seq_.store(s + 2, std::memory_order_release);
+        }
+
+        // 3b. Also push to the timestamped ring (Option C alignment). Single
+        //     producer (this RT thread), multiple readers (Python).
+        //     The release-store of write_idx makes the slot's fields visible
+        //     to any reader that observes the new index; readers verify they
+        //     weren't lapped by re-reading write_idx after copying the slot.
+        {
+            const uint64_t idx = state_ring_write_idx_.load(std::memory_order_relaxed);
+            RingSlot& r = state_ring_[idx % STATE_RING_SIZE];
+            r.ts_mono_ns = now_ns();
+            r.pos = cur_pos;
+            r.vel = cur_vel;
+            r.torque = cur_torque;
+            state_ring_write_idx_.store(idx + 1, std::memory_order_release);
         }
 
         // Publish health state (seqlock)

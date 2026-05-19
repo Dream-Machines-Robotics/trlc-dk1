@@ -95,6 +95,16 @@ struct GripperState {
     double torque = 0.0;
 };
 
+// Timestamped state snapshot used by get_state_at() for timestamp-aligned
+// observation assembly. ts_mono_ns is the CLOCK_MONOTONIC time at which the
+// RT thread observed and published this state (same time base the camera
+// daemon uses for its frame timestamps).
+struct TimedJointSnapshot {
+    uint64_t ts_mono_ns = 0;
+    JointState joints;
+    GripperState gripper;
+};
+
 struct HealthState {
     // Safety
     bool damping_mode = false;
@@ -132,6 +142,17 @@ public:
     // State (lock-free reads via seqlock)
     JointState get_joint_state() const;
     GripperState get_gripper_state() const;
+
+    // Timestamp-aligned state lookup. Returns the latest snapshot whose
+    // ts_mono_ns <= the requested time, sourced from a small ring of recent
+    // RT-thread publications. Returns true on success; false if no sample
+    // at-or-before `ts_ns` is available (target time predates the oldest
+    // still-buffered slot, or no samples have been published yet).
+    //
+    // Used by timestamp-aligned observation assembly (Option C): the record /
+    // rollout loop picks the latest camera frame's kernel capture timestamp
+    // as the reference T and asks every other sensor for its state at T.
+    bool get_state_at(uint64_t ts_ns, TimedJointSnapshot& out) const;
 
     // Health and error state (lock-free read via seqlock)
     HealthState get_health() const;
@@ -181,6 +202,19 @@ private:
     // State seqlock (RT writes, Python reads)
     alignas(64) StateBuffer state_buf_;
     alignas(64) std::atomic<uint64_t> state_seq_{0};
+
+    // Timestamped state ring (RT writes, Python reads via get_state_at).
+    // 256 slots at 250 Hz ≈ 1 s of history — plenty of margin for aligning
+    // observations to camera frames that are 5–30 ms older than the tick.
+    static constexpr size_t STATE_RING_SIZE = 256;
+    struct RingSlot {
+        uint64_t ts_mono_ns;
+        std::array<double, 7> pos;     // 6 joints + gripper
+        std::array<double, 7> vel;
+        std::array<double, 7> torque;
+    };
+    alignas(64) std::array<RingSlot, STATE_RING_SIZE> state_ring_;
+    alignas(64) std::atomic<uint64_t> state_ring_write_idx_{0};
 
     // Health seqlock (RT writes, Python reads)
     alignas(64) HealthState health_buf_;

@@ -154,6 +154,12 @@ NB_MODULE(_trlc_dk1_rt, m) {
         .def_ro("pos", &GripperState::pos)
         .def_ro("torque", &GripperState::torque);
 
+    // TimedJointSnapshot — used by get_state_at() for Option C alignment.
+    nb::class_<TimedJointSnapshot>(m, "TimedJointSnapshot")
+        .def_ro("ts_mono_ns", &TimedJointSnapshot::ts_mono_ns)
+        .def_ro("joints", &TimedJointSnapshot::joints)
+        .def_ro("gripper", &TimedJointSnapshot::gripper);
+
     // HealthState
     nb::class_<HealthState>(m, "HealthState")
         .def(nb::init<>())
@@ -188,6 +194,18 @@ NB_MODULE(_trlc_dk1_rt, m) {
         .def("command_gripper", &RtControlLoop::command_gripper)
         .def("get_joint_state", &RtControlLoop::get_joint_state)
         .def("get_gripper_state", &RtControlLoop::get_gripper_state)
+        .def("get_state_at",
+             [](const RtControlLoop& loop, uint64_t ts_ns) -> nb::object {
+                 TimedJointSnapshot snap;
+                 if (!loop.get_state_at(ts_ns, snap)) {
+                     return nb::none();
+                 }
+                 return nb::cast(snap);
+             },
+             nb::arg("ts_ns"),
+             "Return a TimedJointSnapshot (joints + gripper) whose ts_mono_ns "
+             "is the latest sample at-or-before the requested time; None if no "
+             "such sample is available in the ~1s ring of recent state.")
         .def("get_health", &RtControlLoop::get_health)
         .def("reset_errors", &RtControlLoop::reset_errors, nb::arg("timeout_ms") = 100)
         .def("get_perf", &RtControlLoop::get_perf)
