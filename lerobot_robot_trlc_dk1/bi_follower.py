@@ -135,6 +135,33 @@ class BiDK1Follower(Robot):
             out[f"right_{key}"] = val
         return out
 
+    # Stats for diagnostics (read by lerobot_record to surface in status line
+    # or end-of-episode summary). All counters are reset on connect().
+    _stats_total_obs: int = 0
+    _stats_obs_aligned: int = 0          # ref_ts_ns was determinable
+    _stats_obs_ref_unchanged: int = 0    # same ref_ts_ns as previous obs (= duplicate)
+    _stats_prev_ref_ts_ns: int | None = None
+
+    def get_observation_stats(self) -> dict[str, int | float]:
+        """Return cumulative observation-assembly stats since connect().
+
+        Useful for detecting frame-rate aliasing duplicates: when
+        ``ref_unchanged`` / ``total`` is non-trivial, the record loop is
+        firing faster than the cameras produce new frames, so consecutive
+        ticks read the same reference time → same image, motors, action →
+        a duplicate row.
+        """
+        return {
+            "total": self._stats_total_obs,
+            "aligned": self._stats_obs_aligned,
+            "ref_unchanged": self._stats_obs_ref_unchanged,
+            "ref_unchanged_pct": (
+                100.0 * self._stats_obs_ref_unchanged / self._stats_total_obs
+                if self._stats_total_obs > 0
+                else 0.0
+            ),
+        }
+
     def get_observation(self) -> dict[str, Any]:
         """Return a single dict of all sensors, aligned in time when possible.
 
@@ -174,6 +201,29 @@ class BiDK1Follower(Robot):
         # Expose to callers (e.g. the recording loop) so they can align the
         # leader teleop snapshot to the same T.
         self._last_observation_ref_ts_ns = ref_ts_ns
+
+        # Update stats — track whether ref_ts_ns changed since last obs. A
+        # streak of unchanged refs means consecutive ticks read the same
+        # frame/motors/action triple → those rows are duplicates in the
+        # dataset, almost always caused by 50 Hz loop vs 50 fps camera
+        # rate aliasing (not by a logic bug).
+        self._stats_total_obs += 1
+        if ref_ts_ns is not None:
+            self._stats_obs_aligned += 1
+            if (
+                self._stats_prev_ref_ts_ns is not None
+                and ref_ts_ns == self._stats_prev_ref_ts_ns
+            ):
+                self._stats_obs_ref_unchanged += 1
+            self._stats_prev_ref_ts_ns = ref_ts_ns
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "bi_follower obs: ref_ts_ns=%s cams=%s prev=%s "
+                "(total=%d, aligned=%d, ref_unchanged=%d)",
+                ref_ts_ns, cam_ts, self._stats_prev_ref_ts_ns,
+                self._stats_total_obs, self._stats_obs_aligned,
+                self._stats_obs_ref_unchanged,
+            )
 
         obs_dict: dict[str, Any] = {}
 
