@@ -136,24 +136,77 @@ class BiDK1Follower(Robot):
         return out
 
     def get_observation(self) -> dict[str, Any]:
-        obs_dict = {}
+        """Return a single dict of all sensors, aligned in time when possible.
 
-        left_obs = self.left_arm.get_observation()
+        Option C: when every bi-follower camera exposes ``latest_capture_time_ns``
+        (true for the cpp backend, false for opencv), we pick a reference time
+        ``T`` = the newest camera frame's kernel capture timestamp and ask every
+        other sensor — motors via the RT loop's state ring, per-arm cameras —
+        for state at-or-before ``T``. The dataset row therefore contains a
+        physically-self-consistent snapshot from ~1 camera period in the past,
+        instead of "latest of everything at tick time" (which can drift apart
+        during Python catch-up).
+
+        The chosen ``T`` is stashed on ``self._last_observation_ref_ts_ns`` so
+        the recording loop can use it to align the leader teleop snapshot too.
+
+        When alignment isn't available (e.g. CAM_BACKEND=opencv), falls back
+        to the legacy latest semantics.
+        """
+        # Pick the reference time T — newest camera kernel capture timestamp
+        # across all bi-follower cameras. If any camera lacks the API or has
+        # never produced a frame, fall back to latest-of-everything.
+        ref_ts_ns: int | None = None
+        cam_ts: list[int] = []
+        for cam in self.cameras.values():
+            get_ts = getattr(cam, "latest_capture_time_ns", None)
+            if get_ts is None:
+                cam_ts = []
+                break
+            ts = get_ts()
+            if ts is None:
+                cam_ts = []
+                break
+            cam_ts.append(ts)
+        if cam_ts:
+            ref_ts_ns = max(cam_ts)
+
+        # Expose to callers (e.g. the recording loop) so they can align the
+        # leader teleop snapshot to the same T.
+        self._last_observation_ref_ts_ns = ref_ts_ns
+
+        obs_dict: dict[str, Any] = {}
+
+        left_obs = self.left_arm.get_observation(ref_ts_ns=ref_ts_ns)
         obs_dict.update({f"left_{key}": value for key, value in left_obs.items()})
 
-        right_obs = self.right_arm.get_observation()
+        right_obs = self.right_arm.get_observation(ref_ts_ns=ref_ts_ns)
         obs_dict.update({f"right_{key}": value for key, value in right_obs.items()})
 
         for cam_key, cam in self.cameras.items():
             start = time.perf_counter()
-            # Use read_latest() to avoid blocking when loop runs faster than camera FPS.
-            # This returns the most recent frame immediately (~0ms) instead of waiting
-            # for a new frame (~33ms at 30fps). Critical for 50fps dataset with 30fps cameras.
-            obs_dict[cam_key] = cam.read_latest()
+            frame = None
+            if ref_ts_ns is not None and hasattr(cam, "read_at_or_before"):
+                frame = cam.read_at_or_before(ref_ts_ns)
+            if frame is None:
+                # Fallback: legacy non-blocking latest read.
+                frame = cam.read_latest()
+            obs_dict[cam_key] = frame
             dt_ms = (time.perf_counter() - start) * 1e3
             logger.debug(f"{self} read {cam_key}: {dt_ms:.1f}ms")
 
         return obs_dict
+
+    @property
+    def last_observation_ref_ts_ns(self) -> int | None:
+        """Reference time used by the most recent ``get_observation()``.
+
+        ``None`` if no observation has been taken yet, or if the cameras
+        don't support timestamp alignment (legacy / opencv backend). Used
+        by the recording loop to align the leader teleop snapshot to the
+        same T the rest of the observation was assembled from.
+        """
+        return getattr(self, "_last_observation_ref_ts_ns", None)
 
     def send_action(self, action: dict[str, Any]) -> dict[str, Any]:
         left_action = {
