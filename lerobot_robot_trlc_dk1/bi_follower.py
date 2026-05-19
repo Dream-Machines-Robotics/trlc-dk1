@@ -14,6 +14,7 @@
 
 from dataclasses import dataclass, field
 from functools import cached_property
+import os
 import time
 import logging
 from typing import Any
@@ -57,7 +58,21 @@ class BiDK1Follower(Robot):
         super().__init__(config)
 
         self.config = config
-        
+
+        # Option C alignment toggle. Default ON; set LEROBOT_OBS_ALIGN=0 in the
+        # environment to disable and fall back to "latest of everything per
+        # tick" semantics (matches upstream LeRobot behaviour but produces noisy
+        # labels under rate-aliasing and transient stalls). See SPEC.md for the
+        # trade-off analysis.
+        _align_env = os.environ.get("LEROBOT_OBS_ALIGN", "1").strip().lower()
+        self._align_observations = _align_env not in ("0", "false", "no", "off")
+        if not self._align_observations:
+            logger.warning(
+                "BiDK1Follower: LEROBOT_OBS_ALIGN=%r — Option C alignment DISABLED; "
+                "observations will use latest-of-everything semantics.",
+                _align_env,
+            )
+
         left_arm_config = DK1FollowerConfig(
             port=self.config.left_arm_port,
             disable_torque_on_disconnect=self.config.disable_torque_on_disconnect,
@@ -185,18 +200,22 @@ class BiDK1Follower(Robot):
         # never produced a frame, fall back to latest-of-everything.
         ref_ts_ns: int | None = None
         cam_ts: list[int] = []
-        for cam in self.cameras.values():
-            get_ts = getattr(cam, "latest_capture_time_ns", None)
-            if get_ts is None:
-                cam_ts = []
-                break
-            ts = get_ts()
-            if ts is None:
-                cam_ts = []
-                break
-            cam_ts.append(ts)
-        if cam_ts:
-            ref_ts_ns = max(cam_ts)
+        if self._align_observations:
+            for cam in self.cameras.values():
+                get_ts = getattr(cam, "latest_capture_time_ns", None)
+                if get_ts is None:
+                    cam_ts = []
+                    break
+                ts = get_ts()
+                if ts is None:
+                    cam_ts = []
+                    break
+                cam_ts.append(ts)
+            if cam_ts:
+                ref_ts_ns = max(cam_ts)
+        # If _align_observations is False, ref_ts_ns stays None — every
+        # downstream call (per-arm get_observation, cam.read_at_or_before)
+        # already handles None as "use legacy latest semantics".
 
         # Expose to callers (e.g. the recording loop) so they can align the
         # leader teleop snapshot to the same T.
