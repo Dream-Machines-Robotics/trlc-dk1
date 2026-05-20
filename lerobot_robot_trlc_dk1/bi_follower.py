@@ -14,6 +14,7 @@
 
 from dataclasses import dataclass, field
 from functools import cached_property
+import os
 import time
 import logging
 from typing import Any
@@ -57,7 +58,16 @@ class BiDK1Follower(Robot):
         super().__init__(config)
 
         self.config = config
-        
+
+        # Observation-alignment toggle. Default OFF (matches upstream LeRobot
+        # "latest-of-everything-per-tick" semantics). Set LEROBOT_OBS_ALIGN=1 in
+        # the environment to instead pick a reference time T (= newest camera
+        # kernel capture timestamp) and source motor + leader state from T, so
+        # every dataset row contains a self-consistent (image, motors, action)
+        # triple at the cost of one camera period of inherent latency.
+        _align_env = os.environ.get("LEROBOT_OBS_ALIGN", "0").strip().lower()
+        self._align_observations = _align_env in ("1", "true", "yes", "on")
+
         left_arm_config = DK1FollowerConfig(
             port=self.config.left_arm_port,
             disable_torque_on_disconnect=self.config.disable_torque_on_disconnect,
@@ -125,25 +135,173 @@ class BiDK1Follower(Robot):
         self.left_arm.configure()
         self.right_arm.configure()
 
+    def get_joint_torques(self) -> dict[str, float]:
+        """Per-arm torque side-channel for haptic feedback. Mirrors
+        ``DK1Follower.get_joint_torques`` with ``left_/right_`` prefixes."""
+        out: dict[str, float] = {}
+        for key, val in self.left_arm.get_joint_torques().items():
+            out[f"left_{key}"] = val
+        for key, val in self.right_arm.get_joint_torques().items():
+            out[f"right_{key}"] = val
+        return out
+
+    # Stats for diagnostics (read by lerobot_record to surface in status line
+    # or end-of-episode summary). All counters are reset on connect().
+    _stats_total_obs: int = 0
+    # Counts observations where the cpp camera backend gave us a kernel
+    # capture timestamp (regardless of whether OBS_ALIGN was on).
+    _stats_obs_aligned: int = 0
+    # Counts observations whose cam_capture_ts_ns equalled the previous obs's
+    # — i.e. the recording loop fired twice between two camera frames, so
+    # this row's image is a duplicate of the previous row's image (rate-
+    # aliasing). The ground-truth duplicate count for the dataset.
+    _stats_obs_ref_unchanged: int = 0
+    _stats_prev_cam_ts_ns: int | None = None
+
+    def get_observation_stats(self) -> dict[str, int | float]:
+        """Return cumulative observation-assembly stats since connect().
+
+        Useful for detecting frame-rate aliasing duplicates: when
+        ``ref_unchanged`` / ``total`` is non-trivial, the record loop is
+        firing faster than the cameras produce new frames, so consecutive
+        ticks read the same reference time → same image, motors, action →
+        a duplicate row.
+        """
+        return {
+            "total": self._stats_total_obs,
+            "aligned": self._stats_obs_aligned,
+            "ref_unchanged": self._stats_obs_ref_unchanged,
+            "ref_unchanged_pct": (
+                100.0 * self._stats_obs_ref_unchanged / self._stats_total_obs
+                if self._stats_total_obs > 0
+                else 0.0
+            ),
+        }
+
     def get_observation(self) -> dict[str, Any]:
-        obs_dict = {}
-        
-        left_obs = self.left_arm.get_observation()
+        """Return a single dict of all sensors, optionally time-aligned.
+
+        When ``self._align_observations`` is True *and* every bi-follower
+        camera exposes ``latest_capture_time_ns`` (true for the cpp backend,
+        false for opencv), we pick a reference time ``T`` = the newest camera
+        frame's kernel capture timestamp and ask every other sensor — motors
+        via the RT loop's state ring, per-arm cameras — for state at-or-before
+        ``T``. The dataset row then contains a self-consistent snapshot from
+        ~1 camera period in the past, instead of "latest of everything at tick
+        time" (which can drift apart during Python catch-up).
+
+        The chosen ``T`` is stashed on ``self._last_observation_ref_ts_ns`` so
+        the recording loop can use it to align the leader teleop snapshot too.
+
+        When alignment is disabled, or when a camera doesn't carry kernel
+        timestamps, falls back to legacy latest semantics on every read.
+        """
+        # Poll the newest camera kernel capture timestamp across all bi-follower
+        # cameras. We do this UNCONDITIONALLY (whenever the cpp backend is in
+        # use) so we can record it in the timing side-file for diagnostics —
+        # image staleness, rate-aliasing duplicates, image-vs-action skew all
+        # work without needing alignment to be on. If any camera lacks the API
+        # (e.g. opencv backend) or hasn't produced a frame yet, the list is
+        # discarded and cam_capture_ts_ns stays None.
+        cam_ts: list[int] = []
+        for cam in self.cameras.values():
+            get_ts = getattr(cam, "latest_capture_time_ns", None)
+            if get_ts is None:
+                cam_ts = []
+                break
+            ts = get_ts()
+            if ts is None:
+                cam_ts = []
+                break
+            cam_ts.append(ts)
+        cam_capture_ts_ns: int | None = max(cam_ts) if cam_ts else None
+
+        # Alignment is a SEPARATE decision from "do we know the camera ts".
+        # When _align_observations is True and a cam ts is available, use it
+        # as the reference time T that motors / leader / per-cam reads will be
+        # sampled at. Otherwise downstream code paths fall back to "latest
+        # of everything" via the None sentinel.
+        ref_ts_ns: int | None = cam_capture_ts_ns if self._align_observations else None
+
+        # Expose both: ref_ts_ns is the *applied* reference (used by the record
+        # loop to align the teleop snapshot); cam_capture_ts_ns is the
+        # *observed* camera ts at this tick (used by the timing side-file
+        # diagnostics regardless of whether alignment was on).
+        self._last_observation_ref_ts_ns = ref_ts_ns
+        self._last_camera_capture_ts_ns = cam_capture_ts_ns
+
+        # Update stats — track whether the camera ts changed since last obs.
+        # A streak of unchanged values means consecutive ticks read the same
+        # camera frame → those rows are rate-aliasing duplicates (image-side).
+        # This is the ground truth for the dashboard's "Duplicate Frames" card
+        # and is meaningful whether alignment is on or off.
+        self._stats_total_obs += 1
+        if cam_capture_ts_ns is not None:
+            self._stats_obs_aligned += 1
+            if (
+                self._stats_prev_cam_ts_ns is not None
+                and cam_capture_ts_ns == self._stats_prev_cam_ts_ns
+            ):
+                self._stats_obs_ref_unchanged += 1
+            self._stats_prev_cam_ts_ns = cam_capture_ts_ns
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "bi_follower obs: cam_ts=%s ref_ts=%s prev_cam=%s "
+                "(total=%d, with_cam_ts=%d, cam_unchanged=%d)",
+                cam_capture_ts_ns, ref_ts_ns, self._stats_prev_cam_ts_ns,
+                self._stats_total_obs, self._stats_obs_aligned,
+                self._stats_obs_ref_unchanged,
+            )
+
+        obs_dict: dict[str, Any] = {}
+
+        left_obs = self.left_arm.get_observation(ref_ts_ns=ref_ts_ns)
         obs_dict.update({f"left_{key}": value for key, value in left_obs.items()})
 
-        right_obs = self.right_arm.get_observation()
+        right_obs = self.right_arm.get_observation(ref_ts_ns=ref_ts_ns)
         obs_dict.update({f"right_{key}": value for key, value in right_obs.items()})
 
         for cam_key, cam in self.cameras.items():
             start = time.perf_counter()
-            # Use read_latest() to avoid blocking when loop runs faster than camera FPS.
-            # This returns the most recent frame immediately (~0ms) instead of waiting
-            # for a new frame (~33ms at 30fps). Critical for 50fps dataset with 30fps cameras.
-            obs_dict[cam_key] = cam.read_latest()
+            frame = None
+            if ref_ts_ns is not None and hasattr(cam, "read_at_or_before"):
+                frame = cam.read_at_or_before(ref_ts_ns)
+            if frame is None:
+                # Fallback: legacy non-blocking latest read.
+                frame = cam.read_latest()
+            obs_dict[cam_key] = frame
             dt_ms = (time.perf_counter() - start) * 1e3
             logger.debug(f"{self} read {cam_key}: {dt_ms:.1f}ms")
 
         return obs_dict
+
+    @property
+    def last_observation_ref_ts_ns(self) -> int | None:
+        """Reference time *used* by the most recent ``get_observation()``.
+
+        ``None`` when alignment is disabled (``OBS_ALIGN=0``) or unavailable
+        (e.g. opencv backend). Used by the recording loop to align the leader
+        teleop snapshot to the same T that the rest of the observation was
+        assembled from.
+
+        See ``last_camera_capture_ts_ns`` for the camera timestamp that's
+        always tracked when the cpp backend is in use, regardless of whether
+        alignment was actually applied.
+        """
+        return getattr(self, "_last_observation_ref_ts_ns", None)
+
+    @property
+    def last_camera_capture_ts_ns(self) -> int | None:
+        """Newest camera kernel capture timestamp observed at the most recent
+        ``get_observation()``, regardless of the alignment toggle.
+
+        ``None`` only if the cameras don't expose ``latest_capture_time_ns``
+        (i.e. the opencv backend) or none have produced a frame yet. The
+        recording loop writes this to the timing side-file so the dashboard
+        can compute image-staleness and rate-aliasing duplicates without
+        decoding any video, even when ``OBS_ALIGN=0``.
+        """
+        return getattr(self, "_last_camera_capture_ts_ns", None)
 
     def send_action(self, action: dict[str, Any]) -> dict[str, Any]:
         left_action = {

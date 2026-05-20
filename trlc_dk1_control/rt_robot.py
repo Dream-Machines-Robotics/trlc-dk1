@@ -170,6 +170,33 @@ class DK1RobotRT:
         state = self._loop.get_gripper_state()
         return {"pos": state.pos, "torque": state.torque}
 
+    def get_state_at(self, ts_ns: int) -> dict | None:
+        """Return joint+gripper state at-or-before ``ts_ns``, or ``None`` if unavailable.
+
+        Wraps the C++ ``get_state_at`` ring lookup, flattening the result into a
+        dict shaped like ``get_joint_state()`` + ``get_gripper_state()`` combined,
+        plus the actual capture timestamp the ring used (so the caller can audit
+        how stale the alignment is).
+
+        ``None`` is returned when the requested time predates the oldest sample
+        in the ring (~1 s at 250 Hz), or when no samples have been captured yet,
+        or when the RT loop isn't running. The caller should then fall back to
+        the "latest" API.
+        """
+        if self._loop is None:
+            return None
+        snap = self._loop.get_state_at(ts_ns)
+        if snap is None:
+            return None
+        return {
+            "ts_mono_ns": snap.ts_mono_ns,
+            "joint_pos": np.array(snap.joints.pos),
+            "joint_vel": np.array(snap.joints.vel),
+            "joint_torque": np.array(snap.joints.torque),
+            "gripper_pos": snap.gripper.pos,
+            "gripper_torque": snap.gripper.torque,
+        }
+
     def get_perf(self):
         """Return performance snapshot from the RT loop."""
         if self._loop is None:

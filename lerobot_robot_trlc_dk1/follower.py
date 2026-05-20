@@ -203,7 +203,46 @@ class DK1Follower(Robot):
         self.control.switchControlMode(
             self.motors["gripper"], Control_Type.Torque_Pos)
 
-    def get_observation(self) -> dict[str, Any]:
+    def get_joint_torques(self) -> dict[str, float]:
+        """Per-motor torque readings (Nm), straight from the RT loop.
+
+        NOT in ``observation_features`` on purpose: this is a side-channel
+        for runtime UX (haptic feedback), not for dataset recording — adding
+        torque keys to the schema would break policies trained without
+        them. Returns ``{}`` outside RT mode (the Python serial path
+        doesn't surface torque cheaply).
+
+        v1 returns only the gripper torque. Arm joint torques are also
+        available from ``_rt_robot.get_joint_state()["torque"]`` but are
+        gravity-comp dominated at rest, which makes them unsuitable for
+        "is something pushing on the arm" UX without subtracting the
+        gravity model.
+        """
+        if self._rt_robot is None:
+            return {}
+        gripper_state = self._rt_robot.get_gripper_state()
+        # `pos` (normalized 0..1, 0=open / 1=closed) is included alongside
+        # the torque so downstream consumers can compute a numerical
+        # velocity and subtract the inertia/kinetic-friction component
+        # from the haptic intensity. Cheap to ship; ignored if not used.
+        return {
+            "gripper.torque": float(gripper_state["torque"]),
+            "gripper.pos":    float(gripper_state["pos"]),
+        }
+
+    def get_observation(self, ref_ts_ns: int | None = None) -> dict[str, Any]:
+        """Return motor + (optional per-arm) camera observation.
+
+        When ``ref_ts_ns`` is given and the RT loop's state ring contains a
+        sample at-or-before it, the motor readings are sourced from that
+        sample (timestamp-aligned observation). The cameras are
+        likewise asked for their frame at-or-before ``ref_ts_ns`` when they
+        support ``read_at_or_before``. Any alignment failure falls back to
+        the legacy latest-of-everything behavior — never raises.
+
+        ``ref_ts_ns`` is a CLOCK_MONOTONIC nanosecond timestamp. Use ``None``
+        (the default) to get the previous "latest" semantics.
+        """
         if not self.is_connected:
             raise DeviceNotConnectedError(f"{self} is not connected.")
 
@@ -211,15 +250,28 @@ class DK1Follower(Robot):
         obs_dict = {}
 
         if self._rt_robot is not None:
-            # RT mode: read via seqlock (~1 microsecond, thread-safe)
-            joint_state = self._rt_robot.get_joint_state()
-            gripper_state = self._rt_robot.get_gripper_state()
             motor_names = ["joint_1", "joint_2", "joint_3", "joint_4", "joint_5", "joint_6"]
-            for i, name in enumerate(motor_names):
-                obs_dict[f"{name}.pos"] = float(joint_state["pos"][i])
-            obs_dict["gripper.pos"] = float(gripper_state["pos"])
+            aligned = None
+            if ref_ts_ns is not None:
+                aligned = self._rt_robot.get_state_at(ref_ts_ns)
+            if aligned is not None:
+                # Aligned read: sample from the state ring at-or-before ref_ts_ns.
+                joint_pos = aligned["joint_pos"]
+                gripper_pos = aligned["gripper_pos"]
+                # Normalize gripper_pos to [0, 1] like the latest API does. The
+                # C++ side already applied this for the snapshot, so use as-is.
+                for i, name in enumerate(motor_names):
+                    obs_dict[f"{name}.pos"] = float(joint_pos[i])
+                obs_dict["gripper.pos"] = float(gripper_pos)
+            else:
+                # Latest-via-seqlock (legacy / fallback when alignment isn't available).
+                joint_state = self._rt_robot.get_joint_state()
+                gripper_state = self._rt_robot.get_gripper_state()
+                for i, name in enumerate(motor_names):
+                    obs_dict[f"{name}.pos"] = float(joint_state["pos"][i])
+                obs_dict["gripper.pos"] = float(gripper_state["pos"])
         else:
-            # Python serial mode
+            # Python serial mode — no alignment possible
             for key, motor in self.motors.items():
                 self.control.refresh_motor_status(motor)
                 if key == "gripper":
@@ -231,11 +283,17 @@ class DK1Follower(Robot):
         dt_ms = (time.perf_counter() - start) * 1e3
         logger.debug(f"{self} read state: {dt_ms:.1f}ms")
 
-        # Capture images from cameras — use read_latest() for non-blocking reads
-        # when the recording loop runs faster than camera FPS
+        # Capture images from cameras — use read_at_or_before() when alignment
+        # is requested and the camera supports it; fall back to read_latest()
+        # otherwise (e.g. OpenCVCamera doesn't carry kernel timestamps).
         for cam_key, cam in self.cameras.items():
             start = time.perf_counter()
-            obs_dict[cam_key] = cam.read_latest()
+            frame = None
+            if ref_ts_ns is not None and hasattr(cam, "read_at_or_before"):
+                frame = cam.read_at_or_before(ref_ts_ns)
+            if frame is None:
+                frame = cam.read_latest()
+            obs_dict[cam_key] = frame
             dt_ms = (time.perf_counter() - start) * 1e3
             logger.debug(f"{self} read {cam_key}: {dt_ms:.1f}ms")
 
