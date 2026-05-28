@@ -8,6 +8,7 @@ control loop with optional PREEMPT_RT support and lock-free communication.
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 
 import numpy as np
@@ -118,6 +119,26 @@ class DK1RobotRT:
         rt_cfg.emit_velocity_scale = config.EMIT_VELOCITY_SCALE
         rt_cfg.emit_current_scale = config.EMIT_CURRENT_SCALE
         rt_cfg.disable_torque_on_disconnect = config.disable_torque_on_disconnect
+
+        # ④ Optional CPU pinning / priority for the SCHED_FIFO control thread,
+        # opt-in via env (defaults keep the C++ values: priority 80, affinity
+        # -1 = unpinned). Pinning only buys jitter reduction under contention;
+        # for *true* isolation the target core must also be kept clear of other
+        # work (kernel `isolcpus=` / a cpuset), which is a system-config step.
+        aff = os.environ.get("LEROBOT_RT_CPU_AFFINITY", "").strip()
+        if aff:
+            try:
+                rt_cfg.rt_cpu_affinity = int(aff)
+                logger.info("DK1RobotRT: pinning control loop to CPU %d", rt_cfg.rt_cpu_affinity)
+            except ValueError:
+                logger.warning("DK1RobotRT: ignoring bad LEROBOT_RT_CPU_AFFINITY=%r", aff)
+        prio = os.environ.get("LEROBOT_RT_PRIORITY", "").strip()
+        if prio:
+            try:
+                rt_cfg.rt_priority = int(prio)
+                logger.info("DK1RobotRT: control-loop SCHED_FIFO priority %d", rt_cfg.rt_priority)
+            except ValueError:
+                logger.warning("DK1RobotRT: ignoring bad LEROBOT_RT_PRIORITY=%r", prio)
 
         self._rt_cfg = rt_cfg
 
