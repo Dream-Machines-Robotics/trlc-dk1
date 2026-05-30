@@ -60,8 +60,13 @@ class DK1LeaderConfig(TeleoperatorConfig):
     port: str
     gripper_open_pos: int = 2280
     gripper_closed_pos: int = 1670
-    
-    
+    # Bounds a single lost status packet to ~read_timeout_ms before falling through;
+    # paired with read_num_retry=0 so a glitch is a sub-frame skip the C++ RT loop rides
+    # out instead of a multi-frame freeze. Defaults match the ledream Makefile.
+    read_timeout_ms: int = 25
+    read_num_retry: int = 0
+
+
 class DK1Leader(Teleoperator):
     config_class = DK1LeaderConfig
     name = "dk1_leader"
@@ -99,8 +104,10 @@ class DK1Leader(Teleoperator):
             raise DeviceAlreadyConnectedError(f"{self} already connected")
 
         self.bus.connect()
+        self.bus.default_timeout = self.config.read_timeout_ms
+        self.bus.set_timeout(self.config.read_timeout_ms)
         self.configure()
-        
+
         logger.info(f"{self} connected.")
 
     @property
@@ -133,7 +140,9 @@ class DK1Leader(Teleoperator):
 
         start = time.perf_counter()
         
-        action = self.bus.sync_read(normalize=False, data_name="Present_Position", num_retry=2)
+        action = self.bus.sync_read(
+            normalize=False, data_name="Present_Position", num_retry=self.config.read_num_retry
+        )
         action = {f"{motor}.pos": (val/4096*2*np.pi-np.pi) if motor != "gripper" else val for motor, val in action.items()}
         
         # # Normalize gripper position between 1 (closed) and 0 (open)

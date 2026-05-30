@@ -28,7 +28,9 @@ class BiDK1LeaderConfig(TeleoperatorConfig):
     right_arm_port: str
     gripper_open_pos: int = 2280
     gripper_closed_pos: int = 1670
-    
+    read_timeout_ms: int = 25
+    read_num_retry: int = 0
+
     
 class BiDK1Leader(Teleoperator):
     config_class = BiDK1LeaderConfig
@@ -42,11 +44,15 @@ class BiDK1Leader(Teleoperator):
             port=self.config.left_arm_port,
             gripper_open_pos=self.config.gripper_open_pos,
             gripper_closed_pos=self.config.gripper_closed_pos,
+            read_timeout_ms=self.config.read_timeout_ms,
+            read_num_retry=self.config.read_num_retry,
         )
         right_arm_config = DK1LeaderConfig(
             port=self.config.right_arm_port,
             gripper_open_pos=self.config.gripper_open_pos,
             gripper_closed_pos=self.config.gripper_closed_pos,
+            read_timeout_ms=self.config.read_timeout_ms,
+            read_num_retry=self.config.read_num_retry,
         )
         
         self.left_arm = DK1Leader(left_arm_config)
