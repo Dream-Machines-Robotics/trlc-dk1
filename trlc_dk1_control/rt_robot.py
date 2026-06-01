@@ -129,7 +129,10 @@ class DK1RobotRT:
         if aff:
             try:
                 rt_cfg.rt_cpu_affinity = int(aff)
-                logger.info("DK1RobotRT: pinning control loop to CPU %d", rt_cfg.rt_cpu_affinity)
+                if rt_cfg.rt_cpu_affinity >= 0:
+                    logger.info("DK1RobotRT: pinning control loop to CPU %d", rt_cfg.rt_cpu_affinity)
+                else:
+                    logger.info("DK1RobotRT: CPU pinning disabled (affinity %d)", rt_cfg.rt_cpu_affinity)
             except ValueError:
                 logger.warning("DK1RobotRT: ignoring bad LEROBOT_RT_CPU_AFFINITY=%r", aff)
         prio = os.environ.get("LEROBOT_RT_PRIORITY", "").strip()

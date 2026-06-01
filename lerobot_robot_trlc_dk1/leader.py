@@ -60,19 +60,13 @@ class DK1LeaderConfig(TeleoperatorConfig):
     port: str
     gripper_open_pos: int = 2280
     gripper_closed_pos: int = 1670
-    # Per-poll serial read budget for the realtime teleop loop. The Dynamixel
-    # SDK default is 1000 ms — absurd for a 250 Hz loop (4 ms budget) where a
-    # healthy 7-motor read is ~1-3 ms. A lost status packet then freezes teleop
-    # for ~1 s ("hang then jump") and writes ~45 frozen-pose frames into the
-    # dataset. 25 ms = 10x headroom over a healthy read; a glitch becomes a
-    # ~25 ms skip the C++ RT loop rides out by holding the last target.
+    # Bounds a single lost status packet to ~read_timeout_ms before falling through;
+    # paired with read_num_retry=0 so a glitch is a sub-frame skip the C++ RT loop rides
+    # out instead of a multi-frame freeze. Defaults match the ledream Makefile.
     read_timeout_ms: int = 25
-    # Retries on a failed read. 0 for the realtime loop — retrying a lost poll
-    # is pointless when the next 4 ms cycle re-polls anyway, and each retry
-    # multiplies the freeze by another read_timeout_ms.
     read_num_retry: int = 0
 
-    
+
 class DK1Leader(Teleoperator):
     config_class = DK1LeaderConfig
     name = "dk1_leader"
@@ -110,17 +104,11 @@ class DK1Leader(Teleoperator):
             raise DeviceAlreadyConnectedError(f"{self} already connected")
 
         self.bus.connect()
-        self.configure()
-        # Tighten the realtime read budget (SDK default is 1000 ms). Applied
-        # AFTER connect()+configure() so the slower bring-up handshake (motor
-        # pings/writes) keeps the generous default; only the get_action loop
-        # runs on the tight budget.
+        self.bus.default_timeout = self.config.read_timeout_ms
         self.bus.set_timeout(self.config.read_timeout_ms)
+        self.configure()
 
-        logger.info(
-            f"{self} connected (read timeout {self.config.read_timeout_ms} ms, "
-            f"num_retry {self.config.read_num_retry})."
-        )
+        logger.info(f"{self} connected.")
 
     @property
     def is_calibrated(self) -> bool:
@@ -152,7 +140,9 @@ class DK1Leader(Teleoperator):
 
         start = time.perf_counter()
         
-        action = self.bus.sync_read(normalize=False, data_name="Present_Position", num_retry=self.config.read_num_retry)
+        action = self.bus.sync_read(
+            normalize=False, data_name="Present_Position", num_retry=self.config.read_num_retry
+        )
         action = {f"{motor}.pos": (val/4096*2*np.pi-np.pi) if motor != "gripper" else val for motor, val in action.items()}
         
         # # Normalize gripper position between 1 (closed) and 0 (open)
