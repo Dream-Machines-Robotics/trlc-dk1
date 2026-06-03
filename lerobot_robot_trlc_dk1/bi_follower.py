@@ -275,6 +275,24 @@ class BiDK1Follower(Robot):
 
         return obs_dict
 
+    def get_proprioception(self, ref_ts_ns: int | None = None) -> dict[str, Any]:
+        """Joint/gripper observation only — no camera reads.
+
+        Same canonical representation as ``get_observation()`` (per-arm
+        ``left_``/``right_`` prefixed ``.pos`` keys, gripper normalized), sourced
+        from the RT loop's state ring via each arm's ``get_observation`` — but
+        skips the (expensive) camera reads. Used by the high-rate state publisher
+        so it can sample proprioception at the control rate (~250 Hz) without
+        touching the cameras (which the recorder captures out-of-process). With
+        ``ref_ts_ns`` set, joints are the sample at-or-before it (RT-ring aligned).
+        """
+        out: dict[str, Any] = {}
+        left = self.left_arm.get_observation(ref_ts_ns=ref_ts_ns)
+        out.update({f"left_{k}": v for k, v in left.items()})
+        right = self.right_arm.get_observation(ref_ts_ns=ref_ts_ns)
+        out.update({f"right_{k}": v for k, v in right.items()})
+        return out
+
     @property
     def last_observation_ref_ts_ns(self) -> int | None:
         """Reference time *used* by the most recent ``get_observation()``.

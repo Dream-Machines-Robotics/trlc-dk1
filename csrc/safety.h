@@ -2,6 +2,7 @@
 
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <algorithm>
 
 namespace trlc {
@@ -36,12 +37,18 @@ inline void apply_safety(
         tau_ff[i] = std::clamp(tau_ff[i], -torque_limits[i], torque_limits[i]);
     }
 
-    // Over-speed detection
+    const bool was_damping = state.damping_mode;
+
+    // Over-speed detection (track worst offender for the diagnostic log)
     bool any_overspeed = false;
+    int overspeed_joint = -1;
+    double overspeed_val = 0.0, overspeed_lim = 0.0;
     for (int i = 0; i < ndof; ++i) {
         if (std::abs(vel[i]) > velocity_limits[i]) {
             any_overspeed = true;
-            break;
+            if (std::abs(vel[i]) >= std::abs(overspeed_val)) {
+                overspeed_joint = i; overspeed_val = vel[i]; overspeed_lim = velocity_limits[i];
+            }
         }
     }
 
@@ -54,12 +61,16 @@ inline void apply_safety(
         state.overspeed_count = std::max(0, state.overspeed_count - 1);
     }
 
-    // Over-current detection
+    // Over-current detection (track worst offender for the diagnostic log)
     bool any_over = false;
+    int overcurrent_joint = -1;
+    double overcurrent_val = 0.0, overcurrent_lim = 0.0;
     for (int i = 0; i < ndof; ++i) {
         if (std::abs(torque[i]) > torque_limits[i]) {
             any_over = true;
-            break;
+            if (std::abs(torque[i]) >= std::abs(overcurrent_val)) {
+                overcurrent_joint = i; overcurrent_val = torque[i]; overcurrent_lim = torque_limits[i];
+            }
         }
     }
 
@@ -70,6 +81,30 @@ inline void apply_safety(
         }
     } else {
         state.overcurrent_count = std::max(0, state.overcurrent_count - 1);
+    }
+
+    // Edge-triggered diagnostic: damping mode is otherwise SILENT (it just
+    // zeros kp + gravity-comp, so the arm sags with no log line). Print WHY,
+    // once, on the false->true transition. Joints are 0-based (index 0 ==
+    // joint_1). Damping latches until reset_errors().
+    if (!was_damping && state.damping_mode) {
+        if (overspeed_joint >= 0 && state.overspeed_count >= overspeed_threshold) {
+            std::fprintf(stderr,
+                "[SAFETY] damping_mode ENGAGED: OVER-SPEED joint[%d] |vel|=%.3f > limit %.3f rad/s "
+                "(%d consecutive >= thr %d). kp->0 + gravity-comp OFF -> arm will sag. "
+                "Recover with reset_errors().\n",
+                overspeed_joint, std::abs(overspeed_val), overspeed_lim,
+                state.overspeed_count, overspeed_threshold);
+        } else if (overcurrent_joint >= 0 && state.overcurrent_count >= overcurrent_threshold) {
+            std::fprintf(stderr,
+                "[SAFETY] damping_mode ENGAGED: OVER-CURRENT joint[%d] |tau|=%.3f > limit %.3f Nm "
+                "(%d consecutive >= thr %d). kp->0 + gravity-comp OFF -> arm will sag. "
+                "Recover with reset_errors().\n",
+                overcurrent_joint, std::abs(overcurrent_val), overcurrent_lim,
+                state.overcurrent_count, overcurrent_threshold);
+        } else {
+            std::fprintf(stderr, "[SAFETY] damping_mode ENGAGED (trigger ambiguous).\n");
+        }
     }
 
     // In damping mode: zero stiffness and feedforward

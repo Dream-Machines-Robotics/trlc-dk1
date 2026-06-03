@@ -8,6 +8,7 @@ control loop with optional PREEMPT_RT support and lock-free communication.
 from __future__ import annotations
 
 import logging
+import re
 from pathlib import Path
 
 import numpy as np
@@ -82,18 +83,26 @@ class DK1RobotRT:
 
         rt_cfg.joint_torque_limits = np.asarray(config.joint_torque_limits, dtype=np.float64)
 
-        # Apply joint_velocity_scaling to both the velocity limit (rad/s, used by the
-        # overspeed watchdog) and the per-cycle slew limit (rad/cycle, used by the
-        # impedance loop's position ramp). Without this, the Makefile's
-        # JOINT_VELOCITY_SCALING knob silently does nothing in RT mode.
+        # joint_velocity_scaling caps COMMANDED motion only — the per-cycle slew
+        # limit (rad/cycle, the impedance loop's position ramp). It deliberately
+        # does NOT scale the over-speed SAFETY limit (joint_velocity_limits,
+        # rad/s, used by the damping watchdog).
+        #
+        # Why decoupled: coupling them meant a cautious low scaling also tightened
+        # the over-speed trip — at 0.2 the limit became ~1 rad/s, which normal
+        # leader teleop exceeds, so the watchdog slammed into damping mode and the
+        # arm sagged (kp→0 + gravity-comp off). The slew cap already bounds how
+        # fast the loop can *command* the arm, so the over-speed watchdog stays at
+        # the physical limit as a true backstop for instability / external push /
+        # motor runaway. See agent_skills/eval-safety.md.
         vel_scale = float(np.clip(config.joint_velocity_scaling, 1e-3, 1.0))
         if vel_scale != 1.0:
             logger.info(
-                "DK1RobotRT: joint_velocity_scaling=%.3f → scaling joint_velocity_limits "
-                "and max_pos_delta_per_cycle by the same factor.",
+                "DK1RobotRT: joint_velocity_scaling=%.3f → scaling max_pos_delta_per_cycle "
+                "(commanded slew) only; over-speed limit kept at physical max.",
                 vel_scale,
             )
-        rt_cfg.joint_velocity_limits = np.asarray(config.joint_velocity_limits, dtype=np.float64) * vel_scale
+        rt_cfg.joint_velocity_limits = np.asarray(config.joint_velocity_limits, dtype=np.float64)
         rt_cfg.max_pos_delta_per_cycle = np.asarray(config.max_pos_delta_per_cycle, dtype=np.float64) * vel_scale
         rt_cfg.limit_buffer = 0.05
 
@@ -124,10 +133,68 @@ class DK1RobotRT:
     def connect(self) -> None:
         """Start the C++ RT control loop."""
         self._loop = self._RtControlLoop(self._rt_cfg)
-        self._loop.start()
-        logger.info(
-            "DK1RobotRT connected (RT active: %s)", self._loop.is_rt_active()
-        )
+        try:
+            self._loop.start()
+        except RuntimeError as exc:
+            # Turn the C++ "only N/M motors responded" error into a clear,
+            # copy-pasteable diagnosis (E-STOP/power vs a single dead motor).
+            self._explain_motor_init_failure(exc)
+            raise
+        # RT scheduling is applied inside the RT thread, AFTER mlockall — which on
+        # the FIRST loop can take a second or two while it locks the whole
+        # process's pages (torch/mujoco/CUDA). is_rt_active() therefore reads
+        # False if polled right after start() (and the second arm's mlockall is
+        # fast, so the two arms would disagree — exactly the spurious "RT NOT
+        # active" warning). The loop already prints the AUTHORITATIVE status to
+        # stderr ("RT scheduling active (SCHED_FIFO priority N)" or "RT scheduling
+        # not available, using default scheduler"), so we don't re-derive it here.
+        logger.info("DK1RobotRT connected (RT scheduling status printed by the loop)")
+
+    def _explain_motor_init_failure(self, exc: RuntimeError) -> None:
+        """Log a human/LM-friendly diagnosis for a motor-init failure.
+
+        Distinguishes the two common causes from the count of motors that
+        answered: NONE responding ⇒ E-STOP engaged or the arm's motor power is
+        off (the USB-CAN adapter still enumerates on USB power, so the port
+        opens but nothing replies); SOME responding ⇒ power reaches the bus, so
+        it's a per-motor fault (power/CAN connector or a mis-set CAN ID) on the
+        silent one(s). No-op for unrelated RuntimeErrors."""
+        msg = str(exc)
+        if "motors responded" not in msg and "Motor initialization failed" not in msg:
+            return
+        port = getattr(self._config, "serial_port", "?")
+        m = re.search(r"(\d+)\s*/\s*(\d+)\s+arm motors responded", msg)
+        responded, total = (int(m.group(1)), int(m.group(2))) if m else (None, None)
+        missing = re.findall(r"MISSING:\s+(\S+)", msg)
+        L = ["", "=" * 72, f"  ⛔ ARM CONNECT FAILED — port {port}"]
+        if responded is not None:
+            L.append(f"     {responded}/{total} motors responded"
+                     + (f"; silent: {', '.join(missing)}" if missing else ""))
+        if responded == 0:
+            L += [
+                "     → NONE of the motors answered. The USB-CAN adapter is",
+                "       USB-powered, so the serial port still opened — but no motor",
+                "       replied. This almost always means one of:",
+                "         • the E-STOP is engaged, or",
+                "         • this arm's motor power supply (24/48 V) is OFF.",
+                "       Fix: release the E-STOP / switch motor power on, then retry.",
+            ]
+        elif responded and missing:
+            L += [
+                "     → Some motors answered, so power DOES reach the bus — this",
+                "       looks like a per-motor fault on the silent one(s):",
+                f"         • check the power + CAN connector for: {', '.join(missing)}",
+                "         • reseat the CAN daisy-chain link feeding them",
+                "         • verify their CAN IDs (a wrong ID looks like a missing motor)",
+            ]
+        elif responded is None:
+            L += [
+                "     → Could not parse the motor count. Raw error:",
+                f"       {msg.splitlines()[0]}",
+                "       Check the E-STOP, the arm's motor power, and the CAN cable.",
+            ]
+        L += ["=" * 72, ""]
+        logger.error("\n".join(L))
 
     def disconnect(self) -> None:
         """Stop the C++ RT control loop."""
