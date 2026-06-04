@@ -362,6 +362,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     &rerun::Scalars::new([v as f64]),
                 )?;
             }
+            // Rollout phase + intervention, stamped at the joint sample's time so
+            // they line up with state/action. Only logged for policy rollouts
+            // (control_phase >= 0); plain teleop recordings publish PHASE_NONE and
+            // therefore carry no /intervention or /control_phase timeline, so the
+            // exporter adds those columns only when they really exist.
+            if s.control_phase >= 0 {
+                rec.log("/control_phase", &rerun::Scalars::new([s.control_phase as f64]))?;
+                let intervening = (s.control_phase == ring::PHASE_CORRECTING) as i32;
+                rec.log("/intervention", &rerun::Scalars::new([intervening as f64]))?;
+            }
 
             if let Some(c) = cur.as_mut() {
                 c.num_frames += 1;

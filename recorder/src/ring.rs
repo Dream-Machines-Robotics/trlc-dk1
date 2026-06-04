@@ -146,10 +146,14 @@ impl CameraRingReader {
 // Per slot @ meta_offset + idx*slot_stride (publisher writes a slot only while
 // recording, tagging it with the episode it belongs to — so the recorder groups
 // frames by episode without racing the event channel):
-//   0 seq u64 | 8 ref_ts_ns u64 | 16 episode_index i64 | 24 state[sdim] f32 | .. action[adim] f32
+//   0 seq u64 | 8 ref_ts_ns u64 | 16 episode_index i64 | 24 state[sdim] f32
+//   | .. action[adim] f32 | .. control_phase i32 (v2; trailing)
+// control_phase: -1 NONE (plain teleop record) | 0 autonomous | 1 paused | 2 correcting.
 pub const STATE_MAGIC: u32 = 0x444D_5354; // 'DMST'
-pub const STATE_VERSION: u32 = 1;
+pub const STATE_VERSION: u32 = 2;
 const STATE_WRITE_IDX_OFFSET: usize = 32;
+
+pub const PHASE_CORRECTING: i32 = 2;
 
 #[derive(Clone, Debug)]
 pub struct StateSample {
@@ -158,6 +162,8 @@ pub struct StateSample {
     pub episode_index: i64,
     pub state: Vec<f32>,
     pub action: Vec<f32>,
+    /// Rollout control phase for this frame; PHASE_NONE for plain recordings.
+    pub control_phase: i32,
 }
 
 pub struct StateRingReader {
@@ -199,6 +205,7 @@ impl StateRingReader {
     fn read_slot(&self, slot: usize) -> StateSample {
         let base = self.meta_offset + slot * self.slot_stride;
         let rd_f32 = |o: usize| f32::from_le_bytes([self.mmap[o], self.mmap[o + 1], self.mmap[o + 2], self.mmap[o + 3]]);
+        let rd_i32 = |o: usize| i32::from_le_bytes([self.mmap[o], self.mmap[o + 1], self.mmap[o + 2], self.mmap[o + 3]]);
         let mut o = base + 24;
         let mut state = Vec::with_capacity(self.state_dim);
         for _ in 0..self.state_dim {
@@ -210,12 +217,15 @@ impl StateRingReader {
             action.push(rd_f32(o));
             o += 4;
         }
+        // control_phase trails the action floats (v2). `o` now points at it.
+        let control_phase = rd_i32(o);
         StateSample {
             seq: rd_u64(&self.mmap, base),
             ref_ts_ns: rd_u64(&self.mmap, base + 8),
             episode_index: rd_u64(&self.mmap, base + 16) as i64,
             state,
             action,
+            control_phase,
         }
     }
 
