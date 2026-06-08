@@ -582,7 +582,11 @@ void RtControlLoop::rt_thread_func() {
     if (rt_active_) {
         std::fprintf(stderr, "RT scheduling active (SCHED_FIFO priority %d)\n", cfg_.rt_priority);
     } else {
-        std::fprintf(stderr, "RT scheduling not available, using default scheduler\n");
+        // Keep the "RT scheduling not available" prefix — the DreamHub hub greps for
+        // it to surface a clear operator warning in the web log.
+        std::fprintf(stderr, "RT scheduling not available, using default scheduler "
+                             "(jitter under load; grant rtprio/memlock via "
+                             "utils/workstation_fixes/doctor.sh, then re-login)\n");
     }
 
     const uint64_t period_ns = static_cast<uint64_t>(1e9 / cfg_.loop_hz);

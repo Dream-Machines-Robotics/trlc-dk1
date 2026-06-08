@@ -252,7 +252,16 @@ class DK1RobotRT:
         """
         if self._loop is None:
             return None
-        snap = self._loop.get_state_at(ts_ns)
+        # Older native (_trlc_dk1_rt) builds predate this ring-lookup API. Degrade
+        # to the "latest" path — follower.get_observation() already falls back to
+        # get_joint_state/get_gripper_state when this returns None — instead of
+        # raising AttributeError, which killed the 250 Hz state publisher on its
+        # first tick and left every episode .rrd empty. (Rebuild the extension to
+        # restore at-or-before-ts alignment for OBS_ALIGN=1.)
+        get_at = getattr(self._loop, "get_state_at", None)
+        if get_at is None:
+            return None
+        snap = get_at(ts_ns)
         if snap is None:
             return None
         return {

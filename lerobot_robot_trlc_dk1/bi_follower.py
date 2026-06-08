@@ -116,8 +116,18 @@ class BiDK1Follower(Robot):
         self.right_arm.connect()
 
         try:
-            for cam in self.cameras.values():
-                cam.connect()
+            for name, cam in self.cameras.items():
+                try:
+                    cam.connect()
+                except Exception as e:
+                    # The camera's own error only knows its /dev path, not which
+                    # logical camera it is. Prefix the message with the config key
+                    # ("top" / "left_wrist" / "right_wrist") so the operator knows
+                    # immediately which camera to reconnect, then re-raise as-is
+                    # (same type + traceback, no duplicated exception chain).
+                    msg = e.args[0] if e.args else str(e)
+                    e.args = (f"camera '{name}' failed to connect — {msg}", *e.args[1:])
+                    raise
         except Exception:
             # Clean up RT loops if camera connection fails
             self.left_arm.disconnect()

@@ -105,7 +105,9 @@ bool apply_rt_scheduling(int priority, int cpu, bool do_mlockall, double loop_hz
     struct sched_param param{};
     param.sched_priority = priority;
     if (pthread_setschedparam(pthread_self(), SCHED_FIFO, &param) != 0) {
-        std::fprintf(stderr, "rt_utils: SCHED_FIFO priority %d failed: %s\n",
+        std::fprintf(stderr,
+                     "rt_utils: SCHED_FIFO priority %d failed: %s — this user lacks the "
+                     "'rtprio' limit. Grant it: utils/workstation_fixes/doctor.sh (then re-login).\n",
                      priority, std::strerror(errno));
         success = false;
     }
@@ -126,7 +128,10 @@ bool apply_rt_scheduling(int priority, int cpu, bool do_mlockall, double loop_hz
     // mlockall (available on both platforms)
     if (do_mlockall) {
         if (mlockall(MCL_CURRENT | MCL_FUTURE) != 0) {
-            std::fprintf(stderr, "rt_utils: mlockall failed: %s\n", std::strerror(errno));
+            std::fprintf(stderr,
+                         "rt_utils: mlockall failed: %s — raise this user's 'memlock' limit to "
+                         "unlimited: utils/workstation_fixes/doctor.sh (then re-login).\n",
+                         std::strerror(errno));
             success = false;
         }
     }
