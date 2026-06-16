@@ -284,11 +284,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // (one .rrd per episode). Each gets its own recording-id + static
             // styling, so the file is self-contained and the viewer can scope to it.
             if cur.as_ref().map(|c| c.index) != Some(s.episode_index) {
-                if let Some(c) = cur.take() {
-                    eps.push(c);
-                }
                 if let Some(r) = rec.take() {
                     let _ = r.flush_blocking(); // close the prior episode's file
+                }
+                if let Some(c) = cur.take() {
+                    // A discarded take's .rrd would otherwise linger until session-end
+                    // cleanup — long enough for the hub's file-existence watcher to copy,
+                    // register, and upload it the instant THIS next episode's file appears
+                    // (it ingests episode_<N> once any later-indexed file exists). Delete
+                    // it now, before that next file is created, so the watcher never sees
+                    // it. The session-end manifest pass still covers a discard of the very
+                    // last episode (no next-episode transition to trigger this).
+                    if ev.lock().unwrap().discarded.contains(&c.index) {
+                        let _ = std::fs::remove_file(format!("{}/{}", a.out, c.file));
+                    }
+                    eps.push(c);
                 }
                 let file = format!("episode_{:03}.rrd", s.episode_index);
                 let r = rerun::RecordingStreamBuilder::new("dm_record")
