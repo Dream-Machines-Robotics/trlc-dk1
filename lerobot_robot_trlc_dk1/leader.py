@@ -104,9 +104,16 @@ class DK1Leader(Teleoperator):
             raise DeviceAlreadyConnectedError(f"{self} already connected")
 
         self.bus.connect()
+        # Run the one-time connect handshake (configure() writes Torque_Enable /
+        # Operating_Mode / Current_Limit / Goal_Position on the gripper, each reading
+        # back a status packet) at the SDK's default generous timeout. Only AFTER it
+        # do we shrink the read budget to ~one control frame so a lost status packet
+        # in the steady-state get_action() loop is a sub-frame skip, not a freeze.
+        # Setting it before configure() starved those handshake writes (25ms + 0
+        # retries) and intermittently failed with "Incorrect status packet!".
+        self.configure()
         self.bus.default_timeout = self.config.read_timeout_ms
         self.bus.set_timeout(self.config.read_timeout_ms)
-        self.configure()
 
         logger.info(f"{self} connected.")
 
