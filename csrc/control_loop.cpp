@@ -843,7 +843,12 @@ void RtControlLoop::rt_thread_func() {
         // under an unmodelled end-effector payload during long command gaps (e.g. a
         // diffusion policy's denoising step); holding the last target freezes it in
         // place until the next command. Mirrors upstream ff4bc62 (Python pos_vel path).
-        uint64_t cmd_age_ns = t0 - cmd.timestamp_ns;
+        // Underflow-safe age: the Python command thread writes timestamp_ns = now_ns()
+        // asynchronously (~50 Hz), so a command landing AFTER this cycle's t0 was sampled
+        // but read in the same cycle has timestamp_ns > t0. An unsigned t0 - timestamp_ns
+        // would then wrap to ~2^64 ns (~584 yr) and trip a false timeout (logging the
+        // tell-tale "18446744073.71 s"). Such a command is fresh by definition → age 0.
+        uint64_t cmd_age_ns = (t0 > cmd.timestamp_ns) ? (t0 - cmd.timestamp_ns) : 0;
         double cmd_age_s = static_cast<double>(cmd_age_ns) / 1e9;
         if (cmd_age_s > cfg_.command_timeout_s) {
             if (cmd.timestamp_ns != last_stale_warn_cmd_ts) {
