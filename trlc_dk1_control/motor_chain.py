@@ -192,13 +192,14 @@ class DK1MotorChain:
                 time.sleep(0.01)
             if self._control.read_motor_param(motor, DM_variable.CTRL_MODE) is None:
                 raise RuntimeError(f"Cannot communicate with motor {key!r}")
-            print(f"{key} ({motor.MotorType.name}) connected")
+            logger.debug("%s (%s) detected", key, motor.MotorType.name)
 
-        # Switch arm joints to MIT mode
+        # Switch arm joints to MIT mode (motor turns green once enabled)
         for name in arm_joint_names:
             motor = self._motors[name]
             self._control.switchControlMode(motor, Control_Type.MIT)
             self._control.enable(motor)
+            logger.info("%s (%s) connected", name, motor.MotorType.name)
 
         # Read initial arm state
         for i, name in enumerate(arm_joint_names):
@@ -218,6 +219,7 @@ class DK1MotorChain:
 
         self._control.switchControlMode(gripper, Control_Type.VEL)
         self._control.enable(gripper)
+        logger.info("gripper (%s) connected", gripper.MotorType.name)
         self._control.control_Vel(gripper, 5.0)  # gentle homing speed
 
         while True:
@@ -245,7 +247,7 @@ class DK1MotorChain:
         self._vel[6] = gripper.getVelocity()
         self._torque[6] = gripper.getTorque()
 
-        print("Gripper calibrated: open position =", self.gripper_open_pos)
+        logger.info("Gripper calibrated: open position = %s", self.gripper_open_pos)
 
     # -------------------------------------------------------------------------
     # 250 Hz motor loop
@@ -324,6 +326,11 @@ class DK1MotorChain:
             now = time.monotonic()
             if now - self._last_perf_log >= 5.0:
                 hz = self._loop_count / (now - self._last_perf_log)
-                print(f"[motor]  {hz:6.1f} Hz  (target {self._config.motor_thread_hz:.0f} Hz)  loop={elapsed*1e3:.2f} ms")
+                logger.debug(
+                    "[motor]  %6.1f Hz  (target %.0f Hz)  loop=%.2f ms",
+                    hz,
+                    self._config.motor_thread_hz,
+                    elapsed * 1e3,
+                )
                 self._loop_count = 0
                 self._last_perf_log = now
