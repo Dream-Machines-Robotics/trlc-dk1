@@ -83,6 +83,14 @@ One `.rrd` per episode (`episode_<i>.rrd`) + the manifest are written to
 `make export RRD=<…>/_rrd DATASET_REPO_ID=… NEW_W= NEW_H=`. View per-episode with
 `make view RRD=<…>/_rrd` (Rerun's Recordings panel is the episode selector).
 
+The manifest is rewritten **incrementally** (atomic tmp+rename) on every episode
+rollover and on every grade/discard event, not only at exit — the pedal grades
+live nowhere else, so a recorder that dies without a final write (SIGKILL after
+a stuck flush, panic, power) loses at most the in-flight episode's entry, never
+the whole session's grades. (A 243-episode session lost all its grades this way
+on 2026-06-29, before incremental writes.) The exit pass folds in the final
+episode + any grade racing `session_end` and deletes a last-episode discard.
+
 ### Rig test (the remaining validation)
 `make build-recorder && make record-pubsub ARM=both` → record 3 episodes (commit /
 discard / grade), Q out. Confirm: arm feel hitch-free at episode start vs `make

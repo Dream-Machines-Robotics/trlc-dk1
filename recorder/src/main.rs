@@ -22,7 +22,7 @@ use tj::TjCompressor;
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::os::unix::net::UnixDatagram;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -114,8 +114,18 @@ struct EventState {
     grades: HashMap<i64, f64>,
 }
 
+/// Grade/discard events + a generation counter the main loop polls (one atomic
+/// load per tick) to know when the manifest needs a rewrite without taking the
+/// lock. `gen` is bumped while the lock is held, so a load that equals the
+/// last-written value means the written manifest already covered every event.
+#[derive(Default)]
+struct Events {
+    state: Mutex<EventState>,
+    gen: AtomicU64,
+}
+
 /// Bind the Unix datagram socket and consume episode events into shared state.
-fn spawn_event_thread(path: &str, ev: Arc<Mutex<EventState>>) {
+fn spawn_event_thread(path: &str, ev: Arc<Events>) {
     let _ = std::fs::remove_file(path);
     let sock = match UnixDatagram::bind(path) {
         Ok(s) => s,
@@ -139,12 +149,16 @@ fn spawn_event_thread(path: &str, ev: Arc<Mutex<EventState>>) {
                         match parts.as_slice() {
                             ["discard", ep] => {
                                 if let Ok(ep) = ep.parse::<i64>() {
-                                    ev.lock().unwrap().discarded.insert(ep);
+                                    let mut st = ev.state.lock().unwrap();
+                                    st.discarded.insert(ep);
+                                    ev.gen.fetch_add(1, Ordering::SeqCst);
                                 }
                             }
                             ["commit", ep, grade] => {
                                 if let (Ok(ep), Ok(g)) = (ep.parse::<i64>(), grade.parse::<f64>()) {
-                                    ev.lock().unwrap().grades.insert(ep, g);
+                                    let mut st = ev.state.lock().unwrap();
+                                    st.grades.insert(ep, g);
+                                    ev.gen.fetch_add(1, Ordering::SeqCst);
                                 }
                             }
                             ["session_end"] => SESSION_END.store(true, Ordering::SeqCst),
@@ -168,6 +182,39 @@ struct EpisodeRange {
     // episode is Rerun's intended pattern for episodic data: the viewer scopes its
     // timeline + charts to a single take, with no cross-episode bleed.
     file: String,
+}
+
+/// Atomically (tmp + rename) write the session manifest: the pre-rendered static
+/// header + every completed, non-discarded episode with its grade so far.
+///
+/// Called on every episode rollover and on every grade/discard event — NOT only
+/// at exit. The grades live nowhere else until this write, so a recorder that
+/// dies without it (SIGKILL after a stuck flush, panic, power) used to lose the
+/// WHOLE session's pedal grades; now it can only lose the in-flight episode's.
+/// The atomic rename also means the hub's 1 Hz manifest watcher can stage +
+/// upload mid-session copies without ever reading a half-written file.
+fn write_manifest(
+    manifest_path: &str,
+    header: &str,
+    eps: &[EpisodeRange],
+    evs: &EventState,
+) -> std::io::Result<()> {
+    let mut eps_json: Vec<String> = Vec::new();
+    for e in eps {
+        if evs.discarded.contains(&e.index) {
+            continue;
+        }
+        let q = evs.grades.get(&e.index).copied();
+        let qual = q.map(|g| format!("{g}")).unwrap_or_else(|| "null".into());
+        eps_json.push(format!(
+            "{{\"episode_index\": {}, \"file\": {:?}, \"num_frames\": {}, \"start_ts_ns\": {}, \"end_ts_ns\": {}, \"quality\": {}}}",
+            e.index, e.file, e.num_frames, e.start_ts_ns, e.end_ts_ns, qual
+        ));
+    }
+    let m = format!("{{\n{header},\n  \"episodes\": [{}]\n}}\n", eps_json.join(", "));
+    let tmp = format!("{manifest_path}.tmp");
+    std::fs::File::create(&tmp)?.write_all(m.as_bytes())?;
+    std::fs::rename(&tmp, manifest_path)
 }
 
 /// Per-series static styling, applied to EACH per-episode recording so every
@@ -241,11 +288,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         a.action_names = (0..state.action_dim).map(|i| i.to_string()).collect();
     }
 
-    let ev = Arc::new(Mutex::new(EventState::default()));
+    let ev = Arc::new(Events::default());
     spawn_event_thread(&a.event_socket, ev.clone());
 
     let tjc = TjCompressor::new();
     std::fs::create_dir_all(&a.out)?;  // --out is now a DIRECTORY of per-episode .rrd files
+
+    // Static manifest fields, rendered once — write_manifest only re-renders the
+    // per-episode list (the one part that changes during a session).
+    let cams_json: Vec<String> = cams.iter().map(|(name, r, _)|
+        format!("{{\"name\": {:?}, \"width\": {}, \"height\": {}}}", name, r.width, r.height)).collect();
+    let snames_json: String = a.state_names.iter().map(|n| format!("{n:?}")).collect::<Vec<_>>().join(", ");
+    let anames_json: String = a.action_names.iter().map(|n| format!("{n:?}")).collect::<Vec<_>>().join(", ");
+    let manifest_header = format!(
+        "  \"fps\": {},\n  \"task\": {:?},\n  \"state_dim\": {},\n  \"action_dim\": {},\n  \"obs_align\": {},\n  \"state_names\": [{}],\n  \"action_names\": [{}],\n  \"dir\": {:?},\n  \"cameras\": [{}]",
+        a.fps, a.task, state.state_dim, state.action_dim, a.obs_align, snames_json, anames_json, a.out, cams_json.join(", ")
+    );
 
     let mut eps: Vec<EpisodeRange> = Vec::new();
     let mut cur: Option<EpisodeRange> = None;
@@ -254,8 +312,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut drops: u64 = 0;
     let mut last_cam_ts = vec![0u64; cams.len()]; // per-cam last-logged capture ts (dedup)
     let mut consumed = state.write_idx(); // skip pre-existing slots
+    let mut manifest_gen: u64 = 0; // event generation covered by the last manifest write
 
     while !SESSION_END.load(Ordering::SeqCst) {
+        // A grade/discard arrived since the last manifest write (typically the
+        // operator grading the just-finished take while the ring is idle) →
+        // persist it now. Load the generation BEFORE rendering: an event that
+        // slips in mid-write bumps it further and triggers one more write.
+        let g = ev.gen.load(Ordering::SeqCst);
+        if g != manifest_gen {
+            let evs = ev.state.lock().unwrap();
+            if let Err(e) = write_manifest(&a.manifest, &manifest_header, &eps, &evs) {
+                eprintln!("[recorder] WARN: manifest write failed: {e}");
+            }
+            manifest_gen = g;
+        }
         let w = state.write_idx();
         if w < consumed {
             // write_idx went backwards → the ring was re-created under us (a
@@ -295,10 +366,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     // it now, before that next file is created, so the watcher never sees
                     // it. The session-end manifest pass still covers a discard of the very
                     // last episode (no next-episode transition to trigger this).
-                    if ev.lock().unwrap().discarded.contains(&c.index) {
+                    let gen_now = ev.gen.load(Ordering::SeqCst);
+                    let evs = ev.state.lock().unwrap();
+                    if evs.discarded.contains(&c.index) {
                         let _ = std::fs::remove_file(format!("{}/{}", a.out, c.file));
                     }
                     eps.push(c);
+                    // The completed episode goes into the manifest immediately (its
+                    // grade merges in via the event-generation check when committed).
+                    if let Err(e) = write_manifest(&a.manifest, &manifest_header, &eps, &evs) {
+                        eprintln!("[recorder] WARN: manifest write failed: {e}");
+                    }
+                    manifest_gen = gen_now;
                 }
                 let file = format!("episode_{:03}.rrd", s.episode_index);
                 let r = rerun::RecordingStreamBuilder::new("dm_record")
@@ -400,32 +479,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("[recorder] flush_blocking {:.1} ms", tf.elapsed().as_secs_f64() * 1e3);
     }
 
-    // ── manifest (drop + delete discarded episodes' files, attach grades) ──
-    let evs = ev.lock().unwrap();
-    let cams_json: Vec<String> = cams.iter().map(|(name, r, _)|
-        format!("{{\"name\": {:?}, \"width\": {}, \"height\": {}}}", name, r.width, r.height)).collect();
-    let mut eps_json: Vec<String> = Vec::new();
+    // ── final manifest (delete discarded episodes' files, attach last grades) ──
+    // Mid-session writes already persisted everything up to the last rollover /
+    // grade event; this pass folds in the final episode + any grade that raced
+    // session_end, and deletes a last-episode discard's file (no next-episode
+    // rollover ever fired for it).
+    let evs = ev.state.lock().unwrap();
     let mut kept = 0;
     for e in &eps {
         if evs.discarded.contains(&e.index) {
             let _ = std::fs::remove_file(format!("{}/{}", a.out, e.file)); // discarded → delete its file
-            continue;
+        } else {
+            kept += 1;
         }
-        kept += 1;
-        let q = evs.grades.get(&e.index).copied();
-        let qual = q.map(|g| format!("{g}")).unwrap_or_else(|| "null".into());
-        eps_json.push(format!(
-            "{{\"episode_index\": {}, \"file\": {:?}, \"num_frames\": {}, \"start_ts_ns\": {}, \"end_ts_ns\": {}, \"quality\": {}}}",
-            e.index, e.file, e.num_frames, e.start_ts_ns, e.end_ts_ns, qual
-        ));
     }
-    let snames_json: String = a.state_names.iter().map(|n| format!("{n:?}")).collect::<Vec<_>>().join(", ");
-    let anames_json: String = a.action_names.iter().map(|n| format!("{n:?}")).collect::<Vec<_>>().join(", ");
-    let m = format!(
-        "{{\n  \"fps\": {},\n  \"task\": {:?},\n  \"state_dim\": {},\n  \"action_dim\": {},\n  \"obs_align\": {},\n  \"state_names\": [{}],\n  \"action_names\": [{}],\n  \"dir\": {:?},\n  \"cameras\": [{}],\n  \"episodes\": [{}]\n}}\n",
-        a.fps, a.task, state.state_dim, state.action_dim, a.obs_align, snames_json, anames_json, a.out, cams_json.join(", "), eps_json.join(", ")
-    );
-    std::fs::File::create(&a.manifest)?.write_all(m.as_bytes())?;
+    write_manifest(&a.manifest, &manifest_header, &eps, &evs)?;
 
     let total: i64 = eps.iter().map(|e| e.num_frames).sum();
     eprintln!(
@@ -433,4 +501,38 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         eps.len(), kept, eps.len() - kept, total, cams.len(), drops, a.out, a.manifest
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn manifest_lists_completed_non_discarded_with_grades() {
+        let dir = std::env::temp_dir().join(format!("dm_recorder_test_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mpath = dir.join("session.json");
+        let eps = vec![
+            EpisodeRange { index: 0, num_frames: 10, start_ts_ns: 1, end_ts_ns: 2, file: "episode_000.rrd".into() },
+            EpisodeRange { index: 1, num_frames: 20, start_ts_ns: 3, end_ts_ns: 4, file: "episode_001.rrd".into() },
+            EpisodeRange { index: 2, num_frames: 30, start_ts_ns: 5, end_ts_ns: 6, file: "episode_002.rrd".into() },
+        ];
+        let mut evs = EventState::default();
+        evs.grades.insert(0, 4.0);
+        evs.discarded.insert(1);
+        write_manifest(mpath.to_str().unwrap(), "  \"fps\": 50", &eps, &evs).unwrap();
+        let s = std::fs::read_to_string(&mpath).unwrap();
+        assert!(s.contains("\"episode_index\": 0") && s.contains("\"quality\": 4"));
+        assert!(!s.contains("episode_001"), "discarded episode must not be listed");
+        assert!(s.contains("\"episode_index\": 2") && s.contains("\"quality\": null"));
+        // Atomic write: no temp file left behind.
+        assert!(!dir.join("session.json.tmp").exists());
+        // Re-write (a later grade commit) replaces, not appends.
+        evs.grades.insert(2, 1.5);
+        write_manifest(mpath.to_str().unwrap(), "  \"fps\": 50", &eps, &evs).unwrap();
+        let s2 = std::fs::read_to_string(&mpath).unwrap();
+        assert!(s2.contains("\"quality\": 1.5"));
+        assert_eq!(s2.matches("episode_index").count(), 2);
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }
