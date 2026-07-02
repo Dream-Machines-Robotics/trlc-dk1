@@ -4,8 +4,8 @@
   <!--
   Joint limits:
     - joint1: -2.094 to 2.094 (±120°)
-    - joint2: -0.01 to 3.14
-    - joint3: 0 to 4.71  (DM4340)
+    - joint2: -0.08 to 3.14
+    - joint3: -0.08 to 4.71  (DM4340)
     - joint4: -1.95 to 1.57 (-111.7° to +90°)
     - joint5: -1.57 to 1.57 (±90°)
     - joint6: -3.14 to 3.14 (±180°)
@@ -124,7 +124,7 @@
     <axis
       xyz="0 1 0" />
     <limit
-      lower="-0.01"
+      lower="-0.08726646259971647"
       upper="3.141592653589793"
       effort="100"
       velocity="5.4" />
@@ -168,7 +168,7 @@
     <axis
       xyz="0 -1 0" />
     <limit
-      lower="-0.01"
+      lower="-0.08726646259971647"
       upper="4.71238898038469"
       effort="100"
       velocity="5.4" />
@@ -300,8 +300,8 @@
     <axis
       xyz="1 0 0" />
     <limit
-      lower="-3.141592653589793"
-      upper="3.141592653589793"
+      lower="-2.0943951023931953"
+      upper="2.0943951023931953"
       effort="20"
       velocity="5.4" />
   </joint>

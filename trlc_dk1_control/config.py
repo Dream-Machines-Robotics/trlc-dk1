@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -36,28 +35,29 @@ class DK1RobotConfig:
 
     # Thread rates
     motor_thread_hz: float = 250.0
-    server_thread_hz: float = 300.0
+    server_thread_hz: float = 250.0
 
     # MIT PD gains for 6 arm joints [j1, j2, j3, j4, j5, j6]
     arm_kp: np.ndarray = field(
-        default_factory=lambda: np.array([80.0, 70.0, 60.0, 20.0, 20.0, 10.0])
+        default_factory=lambda: np.array([100.0, 100.0, 100.0, 20.0, 20.0, 10.0])
     )
     arm_kd: np.ndarray = field(
         default_factory=lambda: np.array([5.0, 5.0, 4.0, 1.0, 1.0, 1.0])
     )
 
-    # Joint position limits (radians), shape (6, 2) — [min, max] per joint
-    # Joints 1-3 (DM4340): physically limited by arm geometry; use conservative ±π
-    # Joints 4-5 (DM4310): taken from follower.py JOINT_LIMITS
-    # Joint 6   (DM4310): full ±π
+    # Joint position limits (radians), shape (6, 2) — [min, max] per joint.
+    # Kept in sync with the <limit> tags in the follower URDF so the gravity-comp
+    # model (MuJoCo) and the commanded-position clamp agree — a mismatch lets the
+    # server command into a region MuJoCo treats as a limit violation, which
+    # injects a spurious constraint torque into the gravity-comp feedforward.
     joint_pos_limits: np.ndarray = field(
         default_factory=lambda: np.array([
-            [-math.pi,       math.pi      ],   # joint_1
-            [-math.pi,       math.pi      ],   # joint_2
-            [-math.pi,       math.pi      ],   # joint_3
-            [-100*math.pi/180, 100*math.pi/180],  # joint_4
-            [-90*math.pi/180,  90*math.pi/180 ],  # joint_5
-            [-math.pi,       math.pi      ],   # joint_6
+            [-2.0943951023931953,  2.0943951023931953],   # joint_1  (-120° / +120°)
+            [-0.08726646259971647, 3.141592653589793 ],   # joint_2  (  -5° / +180°)
+            [-0.08726646259971647, 4.71238898038469  ],   # joint_3  (  -5° / +270°)
+            [-1.95,                1.5707963267948966],   # joint_4  (-111.7° / +90°)
+            [-1.5707963267948966,  1.5707963267948966],   # joint_5  ( -90° /  +90°)
+            [-2.0943951023931953,  2.0943951023931953],   # joint_6  (-120° / +120°)
         ])
     )
 
@@ -91,7 +91,7 @@ class DK1RobotConfig:
     joint_velocity_scaling: float = 1.0
 
     # Safety watchdog
-    command_timeout_s: float = 0.5    # hold position (damping only) after this idle period
+    command_timeout_s: float = 0.5    # warn (but keep holding last target) after this idle period
     overcurrent_threshold: int = 20   # consecutive over-limit torque counts before damping
     overspeed_threshold: int = 5      # consecutive over-limit velocity counts before damping
     min_motors_required: int = 6      # throw if fewer arm motors respond during init

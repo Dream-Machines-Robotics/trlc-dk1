@@ -622,6 +622,11 @@ void RtControlLoop::rt_thread_func() {
     // Comm loss state machine
     bool comm_error_disable_sent = false;
 
+    // Command-timeout watchdog: timestamp of the command we last warned about, so
+    // the stale-command warning fires once per stale episode (re-arms when a fresh
+    // command arrives with a new timestamp). RT-thread-local; no atomics needed.
+    uint64_t last_stale_warn_cmd_ts = 0;
+
     // Warmup phase: send refresh frames for a few cycles to fill the pipeline
     // before sending MIT commands. This ensures cur_pos is populated from
     // actual motor feedback, not zeros.
@@ -832,11 +837,25 @@ void RtControlLoop::rt_thread_func() {
         }
 
         // 6. Watchdog
-        uint64_t cmd_age_ns = t0 - cmd.timestamp_ns;
+        // On a stale command, KEEP HOLDING the last commanded target (cmd.q_des, which
+        // the seqlock carries forward) at full stiffness + gravity comp — do NOT reset
+        // to the current position. Resetting made the arm track its own droop and sag
+        // under an unmodelled end-effector payload during long command gaps (e.g. a
+        // diffusion policy's denoising step); holding the last target freezes it in
+        // place until the next command. Mirrors upstream ff4bc62 (Python pos_vel path).
+        // Underflow-safe age: the Python command thread writes timestamp_ns = now_ns()
+        // asynchronously (~50 Hz), so a command landing AFTER this cycle's t0 was sampled
+        // but read in the same cycle has timestamp_ns > t0. An unsigned t0 - timestamp_ns
+        // would then wrap to ~2^64 ns (~584 yr) and trip a false timeout (logging the
+        // tell-tale "18446744073.71 s"). Such a command is fresh by definition → age 0.
+        uint64_t cmd_age_ns = (t0 > cmd.timestamp_ns) ? (t0 - cmd.timestamp_ns) : 0;
         double cmd_age_s = static_cast<double>(cmd_age_ns) / 1e9;
         if (cmd_age_s > cfg_.command_timeout_s) {
-            for (int i = 0; i < 6; ++i) {
-                cmd.q_des[static_cast<size_t>(i)] = cur_pos[static_cast<size_t>(i)];
+            if (cmd.timestamp_ns != last_stale_warn_cmd_ts) {
+                std::fprintf(stderr,
+                             "[cycle %llu] No command for %.2f s — holding last commanded target\n",
+                             (unsigned long long)loop_count, cmd_age_s);
+                last_stale_warn_cmd_ts = cmd.timestamp_ns;
             }
         }
 

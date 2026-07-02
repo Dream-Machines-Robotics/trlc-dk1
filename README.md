@@ -46,10 +46,8 @@ Copyright 2025-2026 The Robot Learning Company UG (haftungsbeschränkt). All rig
 ```
 git clone https://github.com/robot-learning-co/trlc-dk1.git
 uv venv
-GIT_LFS_SKIP_SMUDGE=1 uv pip install -e .
+uv pip install -e .
 ```
-GIT_LFS_SKIP_SMUDGE=1 is needed to pull LeRobot as a dependency.
-
 
 This repo uses [LeRobot's plugin conventions](https://huggingface.co/docs/lerobot/integrate_hardware#using-your-own-lerobot-devices-) to be automatically detected by a LeRobot installation in the same Python environment.
 
@@ -71,12 +69,11 @@ uv run lerobot-find-cameras
 uv run lerobot-teleoperate \
     --robot.type=dk1_follower \
     --robot.port=/dev/ttyACM0 \
-    --robot.joint_velocity_scaling=0.2 \
     --teleop.type=dk1_leader \
     --teleop.port=/dev/ttyACM1 \
     --robot.cameras="{ 
-        context: {type: opencv, index_or_path: 0, width: 1280, height: 720, fps: 60, fourcc: "MJPG"}, 
-        wrist: {type: opencv, index_or_path: 1, width: 1280, height: 720, fps: 60, rotation: 180, fourcc: "MJPG"}
+        context: {type: opencv, index_or_path: 0, width: 960, height: 540, fps: 60}, 
+        wrist: {type: opencv, index_or_path: 1, width: 960, height: 540, fps: 60, rotation: 180}
       }" \
     --display_data=true
 ```
@@ -87,18 +84,17 @@ uv run lerobot-teleoperate \
 </summary>
 
 ```bash
-lerobot-record \
+uv run lerobot-record \
     --robot.type=bi_dk1_follower \
     --robot.right_arm_port=/dev/ttyACM0 \
     --robot.left_arm_port=/dev/ttyACM1 \
-    --robot.joint_velocity_scaling=1.0 \
     --teleop.type=bi_dk1_leader \
     --teleop.right_arm_port=/dev/ttyACM2 \
     --teleop.left_arm_port=/dev/ttyACM3 \
     --robot.cameras="{ 
-        head: {type: opencv, index_or_path: /dev/video0, width: 960, height: 540, fps: 60, fourcc: "MJPG"},
-        right_wrist: {type: opencv, index_or_path: /dev/video2, width: 960, height: 540, fps: 60, rotation: 180, fourcc: "MJPG"},
-        left_wrist: {type: opencv, index_or_path: /dev/video4, width: 960, height: 540, fps: 60, rotation: 180, fourcc: "MJPG"},
+        head: {type: opencv, index_or_path: /dev/video0, width: 960, height: 540, fps: 60},
+        right_wrist: {type: opencv, index_or_path: /dev/video2, width: 960, height: 540, fps: 60, rotation: 180},
+        left_wrist: {type: opencv, index_or_path: /dev/video4, width: 960, height: 540, fps: 60, rotation: 180},
       }" \
     --dataset.repo_id=$USER/my_test_dataset \
     --dataset.push_to_hub=false \

@@ -236,6 +236,40 @@ static void test_partial_packet() {
     std::printf("  partial packet reassembly: PASS\n");
 }
 
+static void test_is_param_response() {
+    // Assemble a 16-byte RX packet: [0]=0xAA, [1]=cmd, [7..14]=data[0..7], [15]=0x55.
+    auto pkt = [](uint8_t cmd, const uint8_t d[8]) {
+        std::array<uint8_t, RX_PACKET_LEN> p{};
+        p[0] = RX_HEADER;
+        p[1] = cmd;
+        p[RX_PACKET_LEN - 1] = RX_TAIL;
+        std::memcpy(p.data() + 7, d, 8);
+        return p;
+    };
+
+    // Real CTRL_MODE acks echo slave id in data[0..1], the 0x33/0x55 ack byte, RID in data[3].
+    uint8_t write_ack[8] = {0x01, 0x00, 0x55, 10, 0x01, 0x00, 0x00, 0x00};  // slave 1, write ack
+    uint8_t read_ack[8]  = {0x07, 0x00, 0x33, 10, 0x01, 0x00, 0x00, 0x00};  // slave 7, read ack
+    assert(is_param_response(pkt(0x11, write_ack).data()));
+    assert(is_param_response(pkt(0x11, read_ack).data()));
+
+    // The bug: a STATE frame whose position LOW byte (data[2]) is 0x33/0x55 must NOT be
+    // read as a param ack. data[1] holds the position HIGH byte (~0x80 near rest), so the
+    // slave-id-echo check rejects it. (Before the fix, data[2] alone made these TRUE.)
+    for (uint8_t low : {static_cast<uint8_t>(0x33), static_cast<uint8_t>(0x55)}) {
+        uint8_t state[8] = {0x01 /*err<<4|id*/, 0x80 /*pos hi*/, low /*pos lo*/,
+                            0x80 /*vel hi*/, 0x00, 0x00, 0x00, 0x00};
+        assert(!is_param_response(pkt(0x11, state).data()));
+    }
+
+    // A state frame near -q_max (pos high byte 0) is still state, caught by the RID/velocity
+    // byte: data[3]=0x80 is a plausible velocity high byte but never a real RID.
+    uint8_t state_low_pos[8] = {0x01, 0x00, 0x55, 0x80, 0x00, 0x00, 0x00, 0x00};
+    assert(!is_param_response(pkt(0x11, state_low_pos).data()));
+
+    std::printf("  is_param_response disambiguation: PASS\n");
+}
+
 int main() {
     std::printf("dm_protocol tests:\n");
     test_float_to_uint_roundtrip();
@@ -247,6 +281,7 @@ int main() {
     test_switch_mode_frame();
     test_packet_parser();
     test_partial_packet();
+    test_is_param_response();
     std::printf("All dm_protocol tests passed!\n");
     return 0;
 }

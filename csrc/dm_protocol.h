@@ -201,11 +201,28 @@ inline uint8_t decode_cmd(const uint8_t* packet) {
     return packet[1];
 }
 
-// Check if a CMD=0x11 packet is a parameter response (not motor state).
-// Parameter responses have data[2] == 0x33 (write ack) or 0x55 (read ack).
+// Tell a parameter read/write acknowledgement apart from a motor STATE frame — both
+// arrive as CMD=0x11. A genuine ack echoes the request header (see build_switch_mode_frame
+// / build_read_param_frame): data[0..1] = slave id (little-endian), data[2] = 0x33 (read
+// ack) / 0x55 (write ack), data[3] = RID. Our slave ids are 1..127, so the ack's data[1]
+// (id high byte) is 0 and data[0] (id low byte) is non-zero, and every RID we use is a
+// small register (< 0x80; in practice only CTRL_MODE=10).
+//
+// A motor state frame instead packs the 16-bit position into data[1..2] (see
+// decode_motor_state), so testing data[2] ALONE was ambiguous: a joint resting at a pose
+// whose position LOW byte happens to be 0x33/0x55 had its good state frame misread as an
+// ack and was dropped — the intermittent "N/6 motors responded … stuck in param mode" at
+// connect, and a spurious one-cycle staleness in the hot loop. The position HIGH byte
+// lands in data[1] (≈0x80 near rest), so the slave-id echo is what cleanly separates them.
+// This can only ever drop a state frame that ALSO sits near -q_max (data[1]==0) with a
+// matching low byte and small velocity byte — vanishingly unlikely, and merely a skipped
+// frame if it happened, never a param ack misread AS state (which would write garbage).
 inline bool is_param_response(const uint8_t* packet) {
-    uint8_t d2 = packet[7 + 2];  // data[2]
-    return d2 == 0x33 || d2 == 0x55;
+    const uint8_t* data = packet + 7;
+    if (data[2] != 0x33 && data[2] != 0x55) return false;  // not a read/write ack byte
+    return data[0] != 0x00 &&   // slave-id low byte names a real motor
+           data[1] == 0x00 &&   // slave-id high byte (ids 1..127); a state frame's here is the position high byte (~0x80)
+           data[3] < 0x80;      // RID is a real register; a state frame's here is the velocity high byte (~0x80)
 }
 
 class PacketParser {
