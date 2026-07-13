@@ -135,6 +135,15 @@ NB_MODULE(_trlc_dk1_rt, m) {
             [](RtLoopConfig& c, nb::ndarray<nb::numpy, const double, nb::shape<6>> arr) {
                 const double* p = arr.data();
                 for (int i = 0; i < 6; ++i) c.max_pos_delta_per_cycle[static_cast<size_t>(i)] = p[i];
+            })
+        .def_prop_rw("max_accel_per_cycle2",
+            [](const RtLoopConfig& c) {
+                return nb::ndarray<nb::numpy, const double, nb::shape<6>>(
+                    c.max_accel_per_cycle2.data(), {6});
+            },
+            [](RtLoopConfig& c, nb::ndarray<nb::numpy, const double, nb::shape<6>> arr) {
+                const double* p = arr.data();
+                for (int i = 0; i < 6; ++i) c.max_accel_per_cycle2[static_cast<size_t>(i)] = p[i];
             });
 
     // JointState

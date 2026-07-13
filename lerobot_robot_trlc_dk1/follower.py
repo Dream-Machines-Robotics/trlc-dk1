@@ -40,6 +40,11 @@ class DK1FollowerConfig(RobotConfig):
     port: str
     disable_torque_on_disconnect: bool = False
     joint_velocity_scaling: float = 0.2
+    # Optional acceleration guard (rad/s², all joints; 0 = off): caps how fast the RT
+    # loop may build up commanded velocity, so a jerky policy jump from rest ramps up
+    # smoothly instead of spiking torque (and supply current) on every joint at once.
+    # Smooth motion is untouched. rt_impedance mode only.
+    joint_accel_limit: float = 0.0
     max_gripper_torque: float = 1.0 # Nm (/0.00875m spur gear radius = 114N gripper force)
     cameras: dict[str, CameraConfig] = field(default_factory=dict)
     # Control mode: "pos_vel" (Python serial) or "rt_impedance" (C++ RT loop at 250Hz)
@@ -120,6 +125,16 @@ class DK1Follower(Robot):
         if self.config.control_mode == "rt_impedance":
             self._connect_rt()
         else:
+            if self.config.joint_accel_limit > 0.0:
+                # The guard lives in the C++ RT loop's slew ramp; the serial path has
+                # no per-cycle ramp to guard. Warn loudly rather than silently no-op
+                # (see agent_skills/eval-safety.md on safety knobs that don't reach
+                # the control loop).
+                logger.warning(
+                    "joint_accel_limit=%s is IGNORED in control_mode='pos_vel' — the "
+                    "acceleration guard only exists in the rt_impedance C++ loop.",
+                    self.config.joint_accel_limit,
+                )
             self.serial_device = serial.Serial(
                 self.config.port, 921600, timeout=0.5)
             time.sleep(0.5)
@@ -141,13 +156,15 @@ class DK1Follower(Robot):
             disable_torque_on_disconnect=self.config.disable_torque_on_disconnect,
             max_gripper_torque_nm=self.config.max_gripper_torque,
             joint_velocity_scaling=self.config.joint_velocity_scaling,
+            joint_accel_limits=np.full(6, max(self.config.joint_accel_limit, 0.0)),
         )
         self._rt_robot = DK1RobotRT(rt_config)
         self._rt_robot.connect()
         self.bus_connected = True
         logger.info(
             f"{self} connected via C++ RT control loop "
-            f"(joint_velocity_scaling={self.config.joint_velocity_scaling})"
+            f"(joint_velocity_scaling={self.config.joint_velocity_scaling}, "
+            f"joint_accel_limit={self.config.joint_accel_limit or 'off'})"
         )
 
     @property

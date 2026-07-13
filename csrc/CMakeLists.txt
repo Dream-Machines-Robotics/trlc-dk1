@@ -121,4 +121,8 @@ if(BUILD_TESTS)
     target_include_directories(test_perf_counters PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     target_link_libraries(test_perf_counters PRIVATE Threads::Threads)
     add_test(NAME test_perf_counters COMMAND test_perf_counters)
+
+    add_executable(test_slew tests/test_slew.cpp)
+    target_include_directories(test_slew PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    add_test(NAME test_slew COMMAND test_slew)
 endif()
