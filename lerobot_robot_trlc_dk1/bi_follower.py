@@ -40,6 +40,8 @@ class BiDK1FollowerConfig(RobotConfig):
     right_arm_port: str
     disable_torque_on_disconnect: bool = False
     joint_velocity_scaling: float = 0.2
+    # Optional acceleration guard (rad/s², all joints; 0 = off) — see DK1FollowerConfig.
+    joint_accel_limit: float = 0.0
     max_gripper_torque: float = 1.0 # Nm (/0.00875m spur gear radius = 114N gripper force)
     cameras: dict[str, CameraConfig] = field(default_factory=dict)
     # Control mode: "pos_vel" (Python serial) or "rt_impedance" (C++ RT loop at 250Hz)
@@ -72,6 +74,7 @@ class BiDK1Follower(Robot):
             port=self.config.left_arm_port,
             disable_torque_on_disconnect=self.config.disable_torque_on_disconnect,
             joint_velocity_scaling=self.config.joint_velocity_scaling,
+            joint_accel_limit=self.config.joint_accel_limit,
             max_gripper_torque=self.config.max_gripper_torque,
             control_mode=self.config.control_mode,
         )
@@ -79,6 +82,7 @@ class BiDK1Follower(Robot):
             port=self.config.right_arm_port,
             disable_torque_on_disconnect=self.config.disable_torque_on_disconnect,
             joint_velocity_scaling=self.config.joint_velocity_scaling,
+            joint_accel_limit=self.config.joint_accel_limit,
             max_gripper_torque=self.config.max_gripper_torque,
             control_mode=self.config.control_mode,
         )

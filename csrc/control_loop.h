@@ -70,6 +70,14 @@ struct RtLoopConfig {
     // Set to 0.0 to disable rate limiting for a joint.
     std::array<double, 6> max_pos_delta_per_cycle = {0.02, 0.02, 0.02, 0.06, 0.06, 0.06};
 
+    // Acceleration guard on the slew ramp (rad/cycle²): caps how fast the
+    // per-cycle step may GROW, so a discontinuous position command ramps up
+    // smoothly instead of demanding the full slew rate in one cycle (the
+    // torque transient of that commanded-velocity step is what browns out
+    // the supply when a policy jumps from rest). Shrinking toward the target
+    // is never limited (no overshoot) — see slew.h. 0.0 disables (default).
+    std::array<double, 6> max_accel_per_cycle2 = {};
+
     // Communication loss detection
     int max_consecutive_empty_cycles = 50;  // 50 cycles = 200ms at 250Hz
     CommLossAction comm_loss_action = CommLossAction::DISABLE;
@@ -236,6 +244,9 @@ private:
 
     // Slew rate limiter state (RT thread only)
     std::array<double, 6> slew_target_ = {};
+    // Last cycle's slew step (rad/cycle) — the acceleration guard's memory.
+    // Reset to 0 wherever slew_target_ snaps to the current position.
+    std::array<double, 6> slew_step_prev_ = {};
 };
 
 } // namespace trlc

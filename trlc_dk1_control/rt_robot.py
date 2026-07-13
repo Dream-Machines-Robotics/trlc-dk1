@@ -105,6 +105,17 @@ class DK1RobotRT:
             )
         rt_cfg.joint_velocity_limits = np.asarray(config.joint_velocity_limits, dtype=np.float64)
         rt_cfg.max_pos_delta_per_cycle = np.asarray(config.max_pos_delta_per_cycle, dtype=np.float64) * vel_scale
+        # Acceleration guard: rad/s² → rad/cycle² at the RT loop rate. Deliberately
+        # NOT multiplied by vel_scale — it bounds how fast the slew ramp may build
+        # up, independent of how fast it is allowed to go.
+        accel_limits = np.asarray(config.joint_accel_limits, dtype=np.float64)
+        if np.any(accel_limits > 0.0):
+            logger.info(
+                "DK1RobotRT: joint_accel_limits=%s rad/s² → acceleration guard on the "
+                "commanded slew ramp (0 = off for that joint).",
+                np.array2string(accel_limits, precision=1),
+            )
+        rt_cfg.max_accel_per_cycle2 = accel_limits / (config.motor_thread_hz**2)
         rt_cfg.limit_buffer = 0.05
 
         # Gravity compensation

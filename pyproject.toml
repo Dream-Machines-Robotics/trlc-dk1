@@ -30,3 +30,9 @@ Documentation = "https://www.docs.robot-learning.co/"
 [tool.scikit-build]
 cmake.source-dir = "csrc"
 cmake.build-type = "Release"
+# Both python packages must be declared: auto-detection only picks the one
+# matching the project name (lerobot_robot_trlc_dk1), so trlc_dk1_control's
+# .py files were missing from the wheel - the editable finder then pinned the
+# package to the .so-only site-packages dir and `trlc_dk1_control.config`
+# failed to import at rollout connect (rt_impedance is the default mode).
+wheel.packages = ["lerobot_robot_trlc_dk1", "trlc_dk1_control"]

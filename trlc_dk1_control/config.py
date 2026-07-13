@@ -90,6 +90,15 @@ class DK1RobotConfig:
     # Range (0, 1]. Values outside this range are clamped at the call site.
     joint_velocity_scaling: float = 1.0
 
+    # Acceleration guard (rad/s²) per joint: caps how fast the RT loop's slew ramp may
+    # build up commanded velocity, so a policy jumping from rest to a distant pose
+    # accelerates smoothly instead of stepping straight to the slew cap (the torque
+    # transient of that velocity step on all joints at once is what browns out the
+    # supply). Steady motion below the slew cap is untouched — the guard only rounds
+    # off discontinuities. 0 disables per joint (default: off). NOT scaled by
+    # joint_velocity_scaling (same decoupling rationale as joint_velocity_limits).
+    joint_accel_limits: np.ndarray = field(default_factory=lambda: np.zeros(6))
+
     # Safety watchdog
     command_timeout_s: float = 0.5    # warn (but keep holding last target) after this idle period
     overcurrent_threshold: int = 20   # consecutive over-limit torque counts before damping

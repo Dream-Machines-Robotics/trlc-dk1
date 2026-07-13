@@ -1,5 +1,6 @@
 #include "control_loop.h"
 #include "rt_utils.h"
+#include "slew.h"
 
 #include <algorithm>
 #include <cmath>
@@ -792,6 +793,7 @@ void RtControlLoop::rt_thread_func() {
                 // Initialize slew target to actual motor positions
                 for (int i = 0; i < 6; ++i) {
                     slew_target_[static_cast<size_t>(i)] = cur_pos[static_cast<size_t>(i)];
+                    slew_step_prev_[static_cast<size_t>(i)] = 0.0;
                 }
 
                 // Reset comm counters so warmup's empty cycles don't trigger comm loss
@@ -820,6 +822,7 @@ void RtControlLoop::rt_thread_func() {
             // Snap slew target to current position to prevent jump after reset
             for (int i = 0; i < 6; ++i) {
                 slew_target_[static_cast<size_t>(i)] = cur_pos[static_cast<size_t>(i)];
+                slew_step_prev_[static_cast<size_t>(i)] = 0.0;
             }
             error_reset_ack_.fetch_add(1, std::memory_order_release);
             std::fprintf(stderr, "[cycle %llu] Error reset acknowledged\n",
@@ -859,17 +862,20 @@ void RtControlLoop::rt_thread_func() {
             }
         }
 
-        // 7. Slew rate limiting
+        // 7. Slew rate limiting + optional acceleration guard (slew.h)
         for (int i = 0; i < 6; ++i) {
-            double max_delta = cfg_.max_pos_delta_per_cycle[static_cast<size_t>(i)];
+            const size_t j = static_cast<size_t>(i);
+            double max_delta = cfg_.max_pos_delta_per_cycle[j];
             if (max_delta > 0.0) {
-                double diff = cmd.q_des[static_cast<size_t>(i)] - slew_target_[static_cast<size_t>(i)];
-                if (diff > max_delta) diff = max_delta;
-                else if (diff < -max_delta) diff = -max_delta;
-                slew_target_[static_cast<size_t>(i)] += diff;
+                double diff = cmd.q_des[j] - slew_target_[j];
+                double step = slew_step(diff, slew_step_prev_[j], max_delta,
+                                        cfg_.max_accel_per_cycle2[j]);
+                slew_step_prev_[j] = step;
+                slew_target_[j] += step;
             } else {
                 // Rate limiting disabled for this joint — pass through
-                slew_target_[static_cast<size_t>(i)] = cmd.q_des[static_cast<size_t>(i)];
+                slew_target_[j] = cmd.q_des[j];
+                slew_step_prev_[j] = 0.0;
             }
         }
 
