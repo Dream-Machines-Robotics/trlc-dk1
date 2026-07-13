@@ -184,6 +184,33 @@ struct EpisodeRange {
     file: String,
 }
 
+/// What to do with a sample whose `episode_index` is `sample`, given the current open
+/// episode (`cur`) and the highest index we've ever opened (`max_started`).
+///
+/// Episode indices from the control stream are monotonic, but at a take boundary the
+/// stream can briefly BOUNCE — republishing the just-finished index out of order
+/// (observed live: `N, N+1, N, N+1`). Treating every "index != current" as a rollover
+/// then re-`.save()`d `episode_<N>.rrd`, which TRUNCATES the finished take down to the
+/// sub-second bounce fragment (the last open of a path wins) and planted a duplicate
+/// manifest row — silent data loss (6 takes destroyed this way in one 361-episode
+/// session, e.g. episode 69's 2465-frame take clobbered to 135 frames). So a sample for
+/// an already-started index that isn't the current one is a replay to SKIP; only a
+/// strictly-higher index rolls over to a new episode.
+#[derive(Debug, PartialEq, Eq)]
+enum Transition {
+    Continue, // same episode — keep logging into it
+    Skip,     // replayed/out-of-order sample for an already-started index — drop it
+    Rollover, // a genuinely new, higher episode index — close the prior, open this one
+}
+
+fn episode_transition(cur: Option<i64>, max_started: i64, sample: i64) -> Transition {
+    match cur {
+        Some(ci) if ci == sample => Transition::Continue,
+        _ if sample <= max_started => Transition::Skip,
+        _ => Transition::Rollover,
+    }
+}
+
 /// Atomically (tmp + rename) write the session manifest: the pre-rendered static
 /// header + every completed, non-discarded episode with its grade so far.
 ///
@@ -307,6 +334,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut eps: Vec<EpisodeRange> = Vec::new();
     let mut cur: Option<EpisodeRange> = None;
+    let mut max_index_started: i64 = -1; // highest episode index ever opened — guards boundary-bounce replays
     let mut rec: Option<rerun::RecordingStream> = None; // the current episode's stream
     let mut frame: i64 = 0; // per-episode frame counter (resets each episode)
     let mut drops: u64 = 0;
@@ -351,49 +379,57 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     continue;
                 }
             };
-            // New episode index → close the prior recording, open a fresh one
-            // (one .rrd per episode). Each gets its own recording-id + static
-            // styling, so the file is self-contained and the viewer can scope to it.
-            if cur.as_ref().map(|c| c.index) != Some(s.episode_index) {
-                if let Some(r) = rec.take() {
-                    let _ = r.flush_blocking(); // close the prior episode's file
-                }
-                if let Some(c) = cur.take() {
-                    // A discarded take's .rrd would otherwise linger until session-end
-                    // cleanup — long enough for the hub's file-existence watcher to copy,
-                    // register, and upload it the instant THIS next episode's file appears
-                    // (it ingests episode_<N> once any later-indexed file exists). Delete
-                    // it now, before that next file is created, so the watcher never sees
-                    // it. The session-end manifest pass still covers a discard of the very
-                    // last episode (no next-episode transition to trigger this).
-                    let gen_now = ev.gen.load(Ordering::SeqCst);
-                    let evs = ev.state.lock().unwrap();
-                    if evs.discarded.contains(&c.index) {
-                        let _ = std::fs::remove_file(format!("{}/{}", a.out, c.file));
+            // New episode index → close the prior recording, open a fresh one (one .rrd
+            // per episode). Each gets its own recording-id + static styling, so the file
+            // is self-contained and the viewer can scope to it. A boundary bounce (an
+            // already-finished index republished out of order) is skipped, not rolled
+            // over — reopening its file would truncate the finished take (see
+            // episode_transition).
+            match episode_transition(cur.as_ref().map(|c| c.index), max_index_started, s.episode_index) {
+                Transition::Continue => {}
+                Transition::Skip => continue,
+                Transition::Rollover => {
+                    if let Some(r) = rec.take() {
+                        let _ = r.flush_blocking(); // close the prior episode's file
                     }
-                    eps.push(c);
-                    // The completed episode goes into the manifest immediately (its
-                    // grade merges in via the event-generation check when committed).
-                    if let Err(e) = write_manifest(&a.manifest, &manifest_header, &eps, &evs) {
-                        eprintln!("[recorder] WARN: manifest write failed: {e}");
+                    if let Some(c) = cur.take() {
+                        // A discarded take's .rrd would otherwise linger until session-end
+                        // cleanup — long enough for the hub's file-existence watcher to copy,
+                        // register, and upload it the instant THIS next episode's file appears
+                        // (it ingests episode_<N> once any later-indexed file exists). Delete
+                        // it now, before that next file is created, so the watcher never sees
+                        // it. The session-end manifest pass still covers a discard of the very
+                        // last episode (no next-episode transition to trigger this).
+                        let gen_now = ev.gen.load(Ordering::SeqCst);
+                        let evs = ev.state.lock().unwrap();
+                        if evs.discarded.contains(&c.index) {
+                            let _ = std::fs::remove_file(format!("{}/{}", a.out, c.file));
+                        }
+                        eps.push(c);
+                        // The completed episode goes into the manifest immediately (its
+                        // grade merges in via the event-generation check when committed).
+                        if let Err(e) = write_manifest(&a.manifest, &manifest_header, &eps, &evs) {
+                            eprintln!("[recorder] WARN: manifest write failed: {e}");
+                        }
+                        manifest_gen = gen_now;
                     }
-                    manifest_gen = gen_now;
+                    let file = format!("episode_{:03}.rrd", s.episode_index);
+                    let r = rerun::RecordingStreamBuilder::new("dm_record")
+                        .recording_id(format!("episode-{}", s.episode_index))
+                        .save(format!("{}/{}", a.out, file))?;
+                    apply_styling(&r, &a.state_names, &a.action_names)?;
+                    rec = Some(r);
+                    frame = 0;
+                    last_cam_ts.iter_mut().for_each(|t| *t = 0); // re-log the first frame of each episode
+                    max_index_started = s.episode_index;
+                    cur = Some(EpisodeRange {
+                        index: s.episode_index,
+                        num_frames: 0,
+                        start_ts_ns: s.ref_ts_ns,
+                        end_ts_ns: s.ref_ts_ns,
+                        file,
+                    });
                 }
-                let file = format!("episode_{:03}.rrd", s.episode_index);
-                let r = rerun::RecordingStreamBuilder::new("dm_record")
-                    .recording_id(format!("episode-{}", s.episode_index))
-                    .save(format!("{}/{}", a.out, file))?;
-                apply_styling(&r, &a.state_names, &a.action_names)?;
-                rec = Some(r);
-                frame = 0;
-                last_cam_ts.iter_mut().for_each(|t| *t = 0); // re-log the first frame of each episode
-                cur = Some(EpisodeRange {
-                    index: s.episode_index,
-                    num_frames: 0,
-                    start_ts_ns: s.ref_ts_ns,
-                    end_ts_ns: s.ref_ts_ns,
-                    file,
-                });
             }
             let rec = rec.as_ref().expect("episode stream open");
             rec.set_time_sequence("frame", frame);
@@ -534,5 +570,24 @@ mod tests {
         assert!(s2.contains("\"quality\": 1.5"));
         assert_eq!(s2.matches("episode_index").count(), 2);
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn episode_transition_skips_boundary_bounce() {
+        // Clean monotonic stream 0,0,1,1: one rollover per new index, no skips.
+        assert_eq!(episode_transition(None, -1, 0), Transition::Rollover);
+        assert_eq!(episode_transition(Some(0), 0, 0), Transition::Continue);
+        assert_eq!(episode_transition(Some(0), 0, 1), Transition::Rollover);
+        assert_eq!(episode_transition(Some(1), 1, 1), Transition::Continue);
+
+        // The live-observed boundary bounce N, N+1, N, N+1: after N+1 is open, the
+        // replayed N must be SKIPPED (a rollover would reopen and truncate N's take),
+        // and the trailing N+1 continues the same open episode.
+        let n = 69_i64;
+        assert_eq!(episode_transition(Some(n), n, n + 1), Transition::Rollover); // open N+1
+        assert_eq!(episode_transition(Some(n + 1), n + 1, n), Transition::Skip); // replayed N: drop
+        assert_eq!(episode_transition(Some(n + 1), n + 1, n + 1), Transition::Continue); // real N+1 tail
+        // Any older replayed index is skipped too, never reopened.
+        assert_eq!(episode_transition(Some(n + 1), n + 1, n - 5), Transition::Skip);
     }
 }
