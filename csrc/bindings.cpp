@@ -217,6 +217,10 @@ NB_MODULE(_trlc_dk1_rt, m) {
              "such sample is available in the ~1s ring of recent state.")
         .def("get_health", &RtControlLoop::get_health)
         .def("reset_errors", &RtControlLoop::reset_errors, nb::arg("timeout_ms") = 100)
+        .def("set_accel_guard", &RtControlLoop::set_accel_guard, nb::arg("on"),
+             "Enable/disable the acceleration guard on the slew ramp at runtime "
+             "(off = slew_step sees max_accel 0.0; the slew-rate cap stays active).")
+        .def("accel_guard_enabled", &RtControlLoop::accel_guard_enabled)
         .def("get_perf", &RtControlLoop::get_perf)
         .def("read_cycle_times", [](const RtControlLoop& loop, size_t max_count) {
             std::vector<float> buf(max_count);

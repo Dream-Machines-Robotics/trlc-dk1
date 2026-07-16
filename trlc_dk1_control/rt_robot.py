@@ -50,6 +50,7 @@ class DK1RobotRT:
         self._config = config
         self._RtControlLoop = RtControlLoop
         self._loop = None
+        self._warned_no_accel_guard = False
 
         # Build RtLoopConfig from DK1RobotConfig
         rt_cfg = RtLoopConfig()
@@ -307,6 +308,30 @@ class DK1RobotRT:
             "gripper_pos": snap.gripper.pos,
             "gripper_torque": snap.gripper.torque,
         }
+
+    def set_accel_guard(self, enabled: bool) -> None:
+        """Enable/disable the slew ramp's acceleration guard at runtime.
+
+        Used by the DAgger strategy to bypass the guard while a human
+        intervenes (leader teleop is continuous, so the guard only adds lag)
+        and restore it before handing control back to the policy. The
+        slew-rate cap itself is unaffected.
+        """
+        if self._loop is None:
+            return
+        # Older native (_trlc_dk1_rt) builds predate this toggle. Warn once and
+        # keep running with the guard permanently on (its compiled-in behavior)
+        # rather than raising AttributeError mid-intervention.
+        setter = getattr(self._loop, "set_accel_guard", None)
+        if setter is None:
+            if not self._warned_no_accel_guard:
+                logger.warning(
+                    "DK1RobotRT: compiled RT extension predates set_accel_guard — "
+                    "acceleration guard stays on. Rebuild with `make rt-ext-ensure`."
+                )
+                self._warned_no_accel_guard = True
+            return
+        setter(enabled)
 
     def get_perf(self):
         """Return performance snapshot from the RT loop."""

@@ -351,6 +351,12 @@ class BiDK1Follower(Robot):
 
         return {**prefixed_send_action_left, **prefixed_send_action_right}
 
+    def set_accel_guard(self, enabled: bool) -> None:
+        """Toggle both arms' acceleration guard. Mirrors
+        ``DK1Follower.set_accel_guard``."""
+        self.left_arm.set_accel_guard(enabled)
+        self.right_arm.set_accel_guard(enabled)
+
     def disconnect(self):
         self.left_arm.disconnect()
         self.right_arm.disconnect()

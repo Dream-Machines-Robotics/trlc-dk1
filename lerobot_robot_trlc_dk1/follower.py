@@ -347,6 +347,24 @@ class DK1Follower(Robot):
 
         return {f"{motor}.pos": val for motor, val in goal_pos.items()}
 
+    def set_accel_guard(self, enabled: bool) -> None:
+        """Toggle the RT loop's acceleration guard at runtime (DAgger: bypass
+        during human intervention, restore before handing back to the policy).
+
+        The guard only exists in the rt_impedance C++ loop (see the connect-time
+        warning about joint_accel_limit in pos_vel mode), so this is a no-op on
+        the serial path.
+        """
+        if self._rt_robot is None:
+            logger.debug(
+                "%s: set_accel_guard(%s) ignored — no RT loop in control_mode="
+                "'pos_vel' (the acceleration guard only exists in the "
+                "rt_impedance C++ loop).",
+                self, enabled,
+            )
+            return
+        self._rt_robot.set_accel_guard(enabled)
+
     def disconnect(self):
         if not self.is_connected:
             raise DeviceNotConnectedError(f"{self} is not connected.")
