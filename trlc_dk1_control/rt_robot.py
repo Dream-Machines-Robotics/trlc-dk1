@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import time
 from pathlib import Path
 
 import numpy as np
@@ -332,6 +333,75 @@ class DK1RobotRT:
                 self._warned_no_accel_guard = True
             return
         setter(enabled)
+
+    # The C++ loop's warmup phase (refresh-only cycles before MIT control starts).
+    # Mirrors WARMUP_CYCLES in csrc/control_loop.cpp — the comm-loss watchdog only
+    # arms after warmup, so a health verdict needs warmup + max_consecutive_empty_cycles
+    # loop cycles before "no comm_loss" actually means "the bus answered".
+    _CPP_WARMUP_CYCLES = 10
+
+    def health_problems(self, wait_for_verdict_s: float = 2.0) -> list[str]:
+        """Return human-readable RT-loop health problems (``[]`` = healthy).
+
+        The C++ loop latches failures instead of raising: motor-bus comm loss
+        DISABLES the motors once and then silently drops every later command
+        (recovery only via ``reset_errors()``), and the safety watchdog's
+        damping mode leaves the arm limp. Callers that are about to trust the
+        arm (rollout setup, episode start) should poll this and abort loudly
+        on problems — see the 2026-08-17 eval that ran 29 s against arms whose
+        loops had comm-loss-disabled themselves 150 ms after connect.
+
+        When polled earlier than the watchdog can have delivered a verdict
+        (right after ``connect()``), blocks up to ``wait_for_verdict_s`` for
+        the loop to pass warmup + ``max_consecutive_empty_cycles`` cycles, so
+        "healthy" is never just "not checked yet".
+        """
+        if self._loop is None:
+            return ["RT control loop is not running (not connected)"]
+        get_health = getattr(self._loop, "get_health", None)
+        if get_health is None:
+            if not getattr(self, "_warned_no_health", False):
+                logger.warning(
+                    "DK1RobotRT: compiled RT extension predates get_health — health "
+                    "checks are no-ops. Rebuild with `make rt-ext-ensure`."
+                )
+                self._warned_no_health = True
+            return []
+
+        verdict_cycles = self._CPP_WARMUP_CYCLES + int(self._rt_cfg.max_consecutive_empty_cycles)
+        deadline = time.monotonic() + max(wait_for_verdict_s, 0.0)
+        health = get_health()
+        while health.loop_count <= verdict_cycles and time.monotonic() < deadline:
+            time.sleep(0.02)
+            health = get_health()
+
+        problems: list[str] = []
+        if not self._loop.is_running():
+            problems.append("RT control loop thread has exited")
+        if health.comm_loss:
+            problems.append(
+                "motor-bus comm loss: the RT loop got 0 bytes from the motors for "
+                f"{self._rt_cfg.max_consecutive_empty_cycles} consecutive cycles, sent DISABLE, "
+                "and now silently drops every command — check the E-STOP and this arm's "
+                "24/48 V motor power, then reconnect"
+            )
+        elif any(health.motor_stale):
+            stale = [
+                _DEFAULT_MOTORS[i]["name"]
+                for i, is_stale in enumerate(health.motor_stale)
+                if is_stale and i < len(_DEFAULT_MOTORS)
+            ]
+            problems.append(
+                f"no recent feedback from motor(s): {', '.join(stale)} — check their "
+                "power/CAN connectors"
+            )
+        if health.damping_mode:
+            problems.append(
+                "safety watchdog tripped into damping mode (overcurrent_count="
+                f"{health.overcurrent_count}, overspeed_count={health.overspeed_count}) — "
+                "the arm is limp until errors are reset"
+            )
+        return problems
 
     def get_perf(self):
         """Return performance snapshot from the RT loop."""

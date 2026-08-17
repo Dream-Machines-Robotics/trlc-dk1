@@ -347,6 +347,20 @@ class DK1Follower(Robot):
 
         return {f"{motor}.pos": val for motor, val in goal_pos.items()}
 
+    def health_problems(self) -> list[str]:
+        """Human-readable robot-health problems (``[]`` = healthy).
+
+        Surfaces the C++ RT loop's latched failure states — motor-bus comm
+        loss (loop DISABLED the motors and now drops every command), safety
+        damping mode, per-motor silence — so orchestration code can abort
+        loudly instead of driving a limp arm. The Python serial path has no
+        equivalent health surface (its failures raise on the spot), so
+        ``pos_vel`` mode always reports healthy.
+        """
+        if self._rt_robot is None:
+            return []
+        return self._rt_robot.health_problems()
+
     def set_accel_guard(self, enabled: bool) -> None:
         """Toggle the RT loop's acceleration guard at runtime (DAgger: bypass
         during human intervention, restore before handing back to the policy).
