@@ -351,6 +351,13 @@ class BiDK1Follower(Robot):
 
         return {**prefixed_send_action_left, **prefixed_send_action_right}
 
+    def health_problems(self) -> list[str]:
+        """Both arms' RT-loop health problems, ``left arm:`` / ``right arm:``
+        prefixed (``[]`` = healthy). Mirrors ``DK1Follower.health_problems``."""
+        return [f"left arm: {p}" for p in self.left_arm.health_problems()] + [
+            f"right arm: {p}" for p in self.right_arm.health_problems()
+        ]
+
     def disconnect(self):
         self.left_arm.disconnect()
         self.right_arm.disconnect()
