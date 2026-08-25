@@ -868,8 +868,14 @@ void RtControlLoop::rt_thread_func() {
             double max_delta = cfg_.max_pos_delta_per_cycle[j];
             if (max_delta > 0.0) {
                 double diff = cmd.q_des[j] - slew_target_[j];
-                double step = slew_step(diff, slew_step_prev_[j], max_delta,
-                                        cfg_.max_accel_per_cycle2[j]);
+                // Guard toggled off ⇒ max_accel = 0.0 (slew_step's disable path).
+                // slew_step_prev_ keeps updating every cycle regardless, so no
+                // reset is needed on toggle — resetting would stall an in-flight
+                // motion at zero step when the guard is re-enabled mid-move.
+                const double max_accel =
+                    accel_guard_enabled_.load(std::memory_order_relaxed)
+                        ? cfg_.max_accel_per_cycle2[j] : 0.0;
+                double step = slew_step(diff, slew_step_prev_[j], max_delta, max_accel);
                 slew_step_prev_[j] = step;
                 slew_target_[j] += step;
             } else {

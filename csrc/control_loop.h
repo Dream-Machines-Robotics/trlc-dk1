@@ -171,6 +171,19 @@ public:
     // Pass timeout_ms=0 for fire-and-forget (non-blocking).
     void reset_errors(int timeout_ms = 100);
 
+    // Runtime toggle for the acceleration guard on the slew ramp (step 7).
+    // Off ⇒ slew_step() sees max_accel = 0.0 (its documented disable path);
+    // the slew-rate cap itself stays active. Lets the DAgger strategy bypass
+    // the guard while a human intervenes (leader teleop is continuous, so the
+    // guard only adds lag there) and restore it before handing back to the
+    // policy. Default on.
+    void set_accel_guard(bool on) {
+        accel_guard_enabled_.store(on, std::memory_order_relaxed);
+    }
+    bool accel_guard_enabled() const {
+        return accel_guard_enabled_.load(std::memory_order_relaxed);
+    }
+
     // Diagnostics
     PerfSnapshot get_perf() const;
     size_t read_cycle_times(float* buf, size_t max) const;
@@ -234,6 +247,9 @@ private:
     // Error reset coordination (Python sets, RT thread increments ack after processing)
     std::atomic<bool> error_reset_requested_{false};
     std::atomic<uint64_t> error_reset_ack_{0};
+
+    // Acceleration-guard toggle (Python writes, RT reads each cycle)
+    std::atomic<bool> accel_guard_enabled_{true};
 
     std::atomic<bool> running_{false};
     std::thread thread_;
