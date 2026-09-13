@@ -221,6 +221,12 @@ NB_MODULE(_trlc_dk1_rt, m) {
              "Enable/disable the acceleration guard on the slew ramp at runtime "
              "(off = slew_step sees max_accel 0.0; the slew-rate cap stays active).")
         .def("accel_guard_enabled", &RtControlLoop::accel_guard_enabled)
+        .def("set_disable_torque_on_disconnect",
+             &RtControlLoop::set_disable_torque_on_disconnect, nb::arg("on"),
+             "Choose at runtime whether stop() releases (disables) the motors. Seeded "
+             "from RtLoopConfig.disable_torque_on_disconnect; arm it only once the arm "
+             "is parked at its rest pose - a released arm that isn't parked falls.")
+        .def("disable_torque_on_disconnect", &RtControlLoop::disable_torque_on_disconnect)
         .def("get_perf", &RtControlLoop::get_perf)
         .def("read_cycle_times", [](const RtControlLoop& loop, size_t max_count) {
             std::vector<float> buf(max_count);

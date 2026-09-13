@@ -364,6 +364,23 @@ class BiDK1Follower(Robot):
         self.left_arm.set_accel_guard(enabled)
         self.right_arm.set_accel_guard(enabled)
 
+    def set_disable_torque_on_disconnect(self, enabled: bool) -> bool:
+        """Both arms — see ``DK1Follower.set_disable_torque_on_disconnect``.
+
+        True only when both arms took the setting. If one could not (stale RT
+        extension on that arm's loop), both are put back to the config value so
+        the pair always disconnects the same way — never one arm released on
+        the strength of the other.
+        """
+        left = self.left_arm.set_disable_torque_on_disconnect(enabled)
+        right = self.right_arm.set_disable_torque_on_disconnect(enabled)
+        if left and right:
+            return True
+        default = self.config.disable_torque_on_disconnect
+        self.left_arm.set_disable_torque_on_disconnect(default)
+        self.right_arm.set_disable_torque_on_disconnect(default)
+        return False
+
     def disconnect(self):
         self.left_arm.disconnect()
         self.right_arm.disconnect()

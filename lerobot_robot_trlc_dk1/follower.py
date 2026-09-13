@@ -89,6 +89,9 @@ class DK1Follower(Robot):
         self.serial_device = None
         self.bus_connected = False
         self._rt_robot = None  # DK1RobotRT instance when using rt_impedance mode
+        # Runtime copy of config.disable_torque_on_disconnect — see
+        # set_disable_torque_on_disconnect(). Reset to the config value on connect().
+        self._disable_torque_on_disconnect = config.disable_torque_on_disconnect
 
         self.gripper_open_pos = 0.0
         self.gripper_closed_pos = -4.7
@@ -122,6 +125,7 @@ class DK1Follower(Robot):
         if self.is_connected:
             raise DeviceAlreadyConnectedError(f"{self} already connected")
 
+        self._disable_torque_on_disconnect = self.config.disable_torque_on_disconnect
         if self.config.control_mode == "rt_impedance":
             self._connect_rt()
         else:
@@ -379,6 +383,24 @@ class DK1Follower(Robot):
             return
         self._rt_robot.set_accel_guard(enabled)
 
+    def set_disable_torque_on_disconnect(self, enabled: bool) -> bool:
+        """Choose at runtime whether the next ``disconnect()`` releases the motors
+        (arm goes limp, free to move by hand) instead of leaving them energised
+        and holding position.
+
+        Overrides ``config.disable_torque_on_disconnect`` for this connection.
+        Arm it only once the arm is verifiably parked at its rest pose — a
+        released arm that isn't parked falls — which is why the config default
+        stays ``False``: a crash or abort mid-session then keeps the arm held.
+        Returns True when the setting will be honoured, False when it cannot be
+        (not connected, or an RT extension build that predates the toggle — the
+        config value applies then).
+        """
+        self._disable_torque_on_disconnect = bool(enabled)
+        if self._rt_robot is not None:
+            return self._rt_robot.set_disable_torque_on_disconnect(enabled)
+        return self.bus_connected
+
     def disconnect(self):
         if not self.is_connected:
             raise DeviceNotConnectedError(f"{self} is not connected.")
@@ -387,11 +409,10 @@ class DK1Follower(Robot):
             self._rt_robot.disconnect()
             self._rt_robot = None
         elif self.control is not None:
-            if self.config.disable_torque_on_disconnect:
+            if self._disable_torque_on_disconnect:
                 for motor in self.motors.values():
                     self.control.disable(motor)
-            else:
-                self.control.serial_.close()
+            self.control.serial_.close()
         self.bus_connected = False
 
         for cam in self.cameras.values():

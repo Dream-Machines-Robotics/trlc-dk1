@@ -51,7 +51,10 @@ static size_t send_and_recv(SerialPort& serial, const uint8_t* tx, size_t tx_len
     return serial.read_with_timeout(rx_buf, rx_max, timeout_us);
 }
 
-RtControlLoop::RtControlLoop(const RtLoopConfig& cfg) : cfg_(cfg) {}
+RtControlLoop::RtControlLoop(const RtLoopConfig& cfg) : cfg_(cfg) {
+    disable_torque_on_disconnect_.store(cfg_.disable_torque_on_disconnect,
+                                        std::memory_order_relaxed);
+}
 
 RtControlLoop::~RtControlLoop() {
     stop();
@@ -132,7 +135,11 @@ void RtControlLoop::stop() {
     // Disable all motors — send all frames back-to-back without waiting
     // for individual responses.  The motors will process the disable
     // commands regardless of whether we read the acks.
-    if (cfg_.disable_torque_on_disconnect) {
+    // Runtime flag (set_disable_torque_on_disconnect), seeded from the config:
+    // the session layer turns it on only once the arm is parked at its rest
+    // pose, so an abort mid-session leaves the motors energised and holding.
+    const bool release = disable_torque_on_disconnect_.load(std::memory_order_relaxed);
+    if (release) {
         for (const auto& m : cfg_.motors) {
             build_disable_frame(frame, m.slave_id);
             serial_.write(frame, 30);
@@ -142,7 +149,8 @@ void RtControlLoop::stop() {
     }
 
     serial_.close();
-    std::fprintf(stderr, "RtControlLoop stopped\n");
+    std::fprintf(stderr, "RtControlLoop stopped (motors %s)\n",
+                 release ? "released" : "left energised, holding position");
 }
 
 void RtControlLoop::command_joint_pos(const double* q6) {
