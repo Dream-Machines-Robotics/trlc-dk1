@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
-"""Zero a DK1 follower's joint encoders at the pose the arm is held in right now.
+"""Zero a DK1 follower's joint encoders at the pose the arm is held in.
 
-    python examples/calibration_follower.py PORT            # zero all 7 motors
-    python examples/calibration_follower.py PORT --check    # ping motors + print positions, zero nothing
+    python examples/calibration_follower.py PORT            # release motors, zero all 7
+    python examples/calibration_follower.py PORT --check    # ping motors + print positions, touch nothing
 
-Motors are never enabled here, so the arm stays limp: hold it in the mechanical
-zero pose, then run. The zero is written into each Damiao motor's own flash
-(CAN command 0xFE) -- nothing is written on the host, and there is no LeRobot
+Flow (default mode): connect -> Enter releases (disables) all motors, the arm
+goes limp -- SUPPORT IT -> move it into the mechanical zero pose -> y writes
+the zero -> readback. Motors stay released afterwards; the next connect()
+re-enables them. The zero is written into each Damiao motor's own flash (CAN
+command 0xFE) -- nothing is written on the host, and there is no LeRobot
 calibration JSON for the DK1. The gripper zero is overwritten again at every
 connect() (torque-homing against the open stop), so its pose does not matter.
 
@@ -37,9 +39,9 @@ def main() -> int:
     ap.add_argument("port", help="follower serial port, e.g. /dev/serial/by-path/...:1.0")
     ap.add_argument(
         "--check", action="store_true",
-        help="only verify every motor answers and print positions; write nothing",
+        help="only verify every motor answers and print positions; motors untouched, nothing written",
     )
-    ap.add_argument("--yes", action="store_true", help="skip the zero-pose confirmation prompt")
+    ap.add_argument("--yes", action="store_true", help="skip both prompts (release + zero)")
     args = ap.parse_args()
 
     follower = DK1Follower(DK1FollowerConfig(port=args.port))
@@ -74,9 +76,15 @@ def main() -> int:
             return 0
 
         if not args.yes:
+            input("Press Enter to RELEASE the motors -- the arm goes limp, support it. ")
+        for motor in follower.motors.values():
+            control.disable(motor)
+        print("motors released: move the arm into the zero pose.")
+
+        if not args.yes:
             ans = input("Arm held in ZERO pose? This overwrites the motors' stored zero. [y/N] ")
             if ans.strip().lower() not in ("y", "yes"):
-                print("aborted, nothing written.")
+                print("aborted, nothing written (motors stay released).")
                 return 2
 
         for key, motor in follower.motors.items():
@@ -89,7 +97,7 @@ def main() -> int:
         if off:
             print(f"WARN: still not at zero: {fmt(off)}")
             return 1
-        print("OK: all motors read ~0 rad.")
+        print("OK: all motors read ~0 rad. Motors stay released; next connect() re-enables them.")
         return 0
     finally:
         ser.close()
