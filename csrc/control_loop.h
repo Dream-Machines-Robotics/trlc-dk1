@@ -184,6 +184,18 @@ public:
         return accel_guard_enabled_.load(std::memory_order_relaxed);
     }
 
+    // Runtime choice of whether stop() releases (disables) the motors.
+    // Seeded from RtLoopConfig::disable_torque_on_disconnect. The session
+    // layer arms it only once the arm is verifiably parked at its rest pose
+    // (a released arm that isn't parked falls), so a crash or abort
+    // mid-session keeps the config default and the motors hold position.
+    void set_disable_torque_on_disconnect(bool on) {
+        disable_torque_on_disconnect_.store(on, std::memory_order_relaxed);
+    }
+    bool disable_torque_on_disconnect() const {
+        return disable_torque_on_disconnect_.load(std::memory_order_relaxed);
+    }
+
     // Diagnostics
     PerfSnapshot get_perf() const;
     size_t read_cycle_times(float* buf, size_t max) const;
@@ -250,6 +262,10 @@ private:
 
     // Acceleration-guard toggle (Python writes, RT reads each cycle)
     std::atomic<bool> accel_guard_enabled_{true};
+
+    // Release-on-stop toggle (Python writes; stop() reads it after the RT
+    // thread has joined). Seeded from cfg_.disable_torque_on_disconnect.
+    std::atomic<bool> disable_torque_on_disconnect_{true};
 
     std::atomic<bool> running_{false};
     std::thread thread_;

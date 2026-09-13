@@ -52,6 +52,7 @@ class DK1RobotRT:
         self._RtControlLoop = RtControlLoop
         self._loop = None
         self._warned_no_accel_guard = False
+        self._warned_no_release_toggle = False
 
         # Build RtLoopConfig from DK1RobotConfig
         rt_cfg = RtLoopConfig()
@@ -333,6 +334,36 @@ class DK1RobotRT:
                 self._warned_no_accel_guard = True
             return
         setter(enabled)
+
+    def set_disable_torque_on_disconnect(self, enabled: bool) -> bool:
+        """Choose at runtime whether ``disconnect()`` releases (disables) the motors.
+
+        Overrides ``DK1RobotConfig.disable_torque_on_disconnect`` for the running
+        loop. The session layer arms it only once the arm is verifiably parked
+        at its rest pose — a released arm that isn't parked falls — so a crash
+        or abort mid-session keeps the config default (motors hold position).
+
+        Returns True when the loop took the setting. False when there is no
+        loop, or the compiled extension predates the toggle — ``disconnect()``
+        then keeps following the config value (warned once so a stale build on
+        a rig is visible).
+        """
+        if self._loop is None:
+            return False
+        setter = getattr(self._loop, "set_disable_torque_on_disconnect", None)
+        if setter is None:
+            if not self._warned_no_release_toggle:
+                logger.warning(
+                    "DK1RobotRT: compiled RT extension predates "
+                    "set_disable_torque_on_disconnect — disconnect keeps "
+                    "disable_torque_on_disconnect=%s from the config. Rebuild with "
+                    "`make rt-ext-ensure`.",
+                    self._config.disable_torque_on_disconnect,
+                )
+                self._warned_no_release_toggle = True
+            return False
+        setter(bool(enabled))
+        return True
 
     # The C++ loop's warmup phase (refresh-only cycles before MIT control starts).
     # Mirrors WARMUP_CYCLES in csrc/control_loop.cpp — the comm-loss watchdog only
