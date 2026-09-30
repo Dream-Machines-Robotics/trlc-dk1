@@ -49,6 +49,9 @@ class DK1FollowerConfig(RobotConfig):
     cameras: dict[str, CameraConfig] = field(default_factory=dict)
     # Control mode: "pos_vel" (Python serial) or "rt_impedance" (C++ RT loop at 250Hz)
     control_mode: str = "rt_impedance"
+    # Which arm this is ("left"/"right", set by the bimanual follower): tags the RT
+    # loop's log lines. Empty falls back to the robot id.
+    label: str = ""
 
 
 class DK1Follower(Robot):
@@ -157,6 +160,7 @@ class DK1Follower(Robot):
 
         rt_config = DK1RobotConfig(
             serial_port=self.config.port,
+            label=self.config.label or (self.config.id or ""),
             disable_torque_on_disconnect=self.config.disable_torque_on_disconnect,
             max_gripper_torque_nm=self.config.max_gripper_torque,
             joint_velocity_scaling=self.config.joint_velocity_scaling,

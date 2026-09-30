@@ -23,6 +23,10 @@ enum class CommLossAction : int {
 
 struct RtLoopConfig {
     std::string serial_port = "/dev/ttyACM0";
+    // Which arm this loop drives ("left"/"right"; empty for a single arm). Prefixes
+    // every RT-thread log line ("[left cycle 123] ...") so a bimanual log says
+    // which arm lost its bus.
+    std::string label;
     double loop_hz = 250.0;
 
     std::vector<MotorDescriptor> motors;  // 7 entries (6 arm + gripper)
@@ -80,6 +84,14 @@ struct RtLoopConfig {
 
     // Communication loss detection
     int max_consecutive_empty_cycles = 50;  // 50 cycles = 200ms at 250Hz
+    // TX side of the same watchdog. A frame write that cannot complete within
+    // tx_frame_timeout_us fails (and the cycle skips its remaining frames); this
+    // many consecutive cycles with a failed write latch comm loss (tx_stalled).
+    // 500 us: a healthy write only copies 30 bytes into the kernel/URB queue
+    // (microseconds), so waiting longer buys nothing - and even a stalled cycle
+    // then costs at most 0.5 ms of its 4 ms budget.
+    int tx_frame_timeout_us = 500;
+    int max_consecutive_tx_fail_cycles = 50;  // 200 ms at 250 Hz, like the RX side
     CommLossAction comm_loss_action = CommLossAction::DISABLE;
     int per_motor_stale_threshold = 100;    // flag motor after 100 cycles (~400ms)
 
@@ -127,6 +139,12 @@ struct HealthState {
     uint64_t total_write_errors = 0;
     std::array<uint64_t, 7> motor_last_seen_cycle = {};
     std::array<bool, 7> motor_stale = {};
+    // TX watchdog: the adapter stopped taking frames (comm_loss is latched too).
+    bool tx_stalled = false;
+    int consecutive_tx_fail_cycles = 0;
+    // Command reads that stayed torn for a whole cycle (the last good command
+    // was reused). Diagnostic only.
+    uint64_t torn_command_reads = 0;
 
     // Loop metadata
     uint64_t loop_count = 0;
@@ -141,7 +159,11 @@ public:
     RtControlLoop& operator=(const RtControlLoop&) = delete;
 
     void start();
-    void stop();
+    // Stop the RT thread and close the port. Always returns within about
+    // timeout_ms (+ the port close deadline): false = the thread did not exit in
+    // time and was abandoned (detached, port left open) - the caller must keep
+    // this object alive, since the thread still references it.
+    bool stop(int timeout_ms = 2000);
 
     // Commands (lock-free writes via seqlock)
     void command_joint_pos(const double* q6);
@@ -267,7 +289,20 @@ private:
     // thread has joined). Seeded from cfg_.disable_torque_on_disconnect.
     std::atomic<bool> disable_torque_on_disconnect_{true};
 
+    // One frame out, bounded by cfg_.tx_frame_timeout_us (RT thread only). Once a
+    // write fails in a cycle the rest of that cycle's frames are skipped.
+    bool send_frame(const uint8_t* frame, bool& cycle_tx_failed);
+    // "[left cycle 12]" / "[cycle 12]" (label empty) - RT-thread log prefix.
+    const char* cycle_tag(uint64_t loop_count);
+    char tag_buf_[64] = {};
+    // "[left] " (or "") - prefix for the loop's non-cycle log lines.
+    std::string arm_prefix_;
+
     std::atomic<bool> running_{false};
+    // Set by the RT thread as its very last action; stop() waits on it with a
+    // deadline instead of an unbounded join().
+    std::atomic<bool> thread_exited_{true};
+    bool thread_abandoned_ = false;
     std::thread thread_;
     bool rt_active_ = false;
 

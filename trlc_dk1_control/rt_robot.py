@@ -19,6 +19,11 @@ from .config import DK1RobotConfig
 
 logger = logging.getLogger(__name__)
 
+# Loops whose RT thread would not exit on stop() (a wedged bus). The detached
+# native thread still references its loop, so these are kept alive for the
+# life of the process instead of being freed under it.
+_ABANDONED_LOOPS: list = []
+
 # Default motor configuration matching motor_chain.py
 _DEFAULT_MOTORS = [
     {"name": "joint_1", "type": "DM4340",  "slave_id": 0x01, "master_id": 0x11},
@@ -53,10 +58,21 @@ class DK1RobotRT:
         self._loop = None
         self._warned_no_accel_guard = False
         self._warned_no_release_toggle = False
+        # Loop-progress watchdog for health_problems(): (loop_count, monotonic time)
+        # of the last health read that saw the count advance.
+        self._last_progress: tuple[int, float] | None = None
 
         # Build RtLoopConfig from DK1RobotConfig
         rt_cfg = RtLoopConfig()
         rt_cfg.serial_port = config.serial_port
+        # Older native builds predate these fields: set only what the build knows.
+        for name, value in (
+            ("label", config.label),
+            ("tx_frame_timeout_us", int(config.tx_frame_timeout_us)),
+            ("max_consecutive_tx_fail_cycles", int(config.max_consecutive_tx_fail_cycles)),
+        ):
+            if hasattr(rt_cfg, name):
+                setattr(rt_cfg, name, value)
         rt_cfg.loop_hz = config.motor_thread_hz
 
         # Motor descriptors
@@ -235,10 +251,22 @@ class DK1RobotRT:
         logger.error("\n".join(L))
 
     def disconnect(self) -> None:
-        """Stop the C++ RT control loop."""
+        """Stop the C++ RT control loop. Never hangs: the native stop() is bounded
+        and releases the GIL."""
         if self._loop is not None:
-            self._loop.stop()
+            stopped = self._loop.stop()
+            if stopped is False:
+                # The RT thread did not exit (a wedged bus) and was detached; it
+                # still references the loop object, so it must never be freed.
+                _ABANDONED_LOOPS.append(self._loop)
+                logger.error(
+                    "DK1RobotRT%s: the RT thread did not exit and was abandoned — "
+                    "the arm's motor bus is wedged; check its CAN cable/connectors and "
+                    "motor power, then power-cycle the arm before the next session",
+                    f" ({self._config.label})" if self._config.label else "",
+                )
             self._loop = None
+            self._last_progress = None
         logger.info("DK1RobotRT disconnected")
 
     def command_joint_pos(self, q_des: np.ndarray) -> None:
@@ -409,7 +437,22 @@ class DK1RobotRT:
         problems: list[str] = []
         if not self._loop.is_running():
             problems.append("RT control loop thread has exited")
-        if health.comm_loss:
+        else:
+            stalled_s = self._loop_stalled_s(int(health.loop_count))
+            if stalled_s is not None:
+                problems.append(
+                    f"RT control loop stalled (no cycles for {stalled_s:.1f} s): the motor "
+                    "bus writes are blocked — check this arm's CAN cable/connectors and "
+                    "motor power"
+                )
+        if health.comm_loss and getattr(health, "tx_stalled", False):
+            problems.append(
+                "CAN TX stalled: the USB-CAN adapter stopped taking motor frames for "
+                f"{self._rt_cfg.max_consecutive_tx_fail_cycles} consecutive cycles, the RT "
+                "loop latched comm loss and now drops every command — check this arm's "
+                "CAN cable/connectors and motor power, then reconnect"
+            )
+        elif health.comm_loss:
             problems.append(
                 "motor-bus comm loss: the RT loop got 0 bytes from the motors for "
                 f"{self._rt_cfg.max_consecutive_empty_cycles} consecutive cycles, sent DISABLE, "
@@ -433,6 +476,23 @@ class DK1RobotRT:
                 "the arm is limp until errors are reset"
             )
         return problems
+
+    # A 250 Hz loop that has not advanced for this long is wedged, not jittery
+    # (> 50 missed cycles; the OS scheduler never holds a SCHED_FIFO thread that long).
+    _STALL_AFTER_S = 0.25
+
+    def _loop_stalled_s(self, loop_count: int) -> float | None:
+        """Seconds the RT loop's cycle counter has not moved, once past
+        ``_STALL_AFTER_S``; None while it advances. get_health() is a lock-free
+        seqlock read, so this works even when the RT thread itself is wedged —
+        and on native builds that predate the TX watchdog."""
+        now = time.monotonic()
+        last = self._last_progress
+        if last is None or loop_count != last[0]:
+            self._last_progress = (loop_count, now)
+            return None
+        idle = now - last[1]
+        return idle if idle > self._STALL_AFTER_S else None
 
     def get_perf(self):
         """Return performance snapshot from the RT loop."""

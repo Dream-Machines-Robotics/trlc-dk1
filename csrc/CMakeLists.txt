@@ -125,4 +125,19 @@ if(BUILD_TESTS)
     add_executable(test_slew tests/test_slew.cpp)
     target_include_directories(test_slew PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     add_test(NAME test_slew COMMAND test_slew)
+
+    # The RT loop end to end against a fake motor bus on a pty (Linux/macOS).
+    add_executable(test_rt_never_blocks tests/test_rt_never_blocks.cpp
+        serial_port.cpp rt_utils.cpp gravity_comp.cpp control_loop.cpp)
+    target_include_directories(test_rt_never_blocks PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    if(MUJOCO_INCLUDE_DIR)
+        target_include_directories(test_rt_never_blocks PRIVATE ${MUJOCO_INCLUDE_DIR})
+    endif()
+    if(MUJOCO_LIBRARY)
+        target_link_libraries(test_rt_never_blocks PRIVATE ${MUJOCO_LIBRARY})
+    endif()
+    target_link_libraries(test_rt_never_blocks PRIVATE Threads::Threads)
+    # Asserts are the test: never compile them out.
+    target_compile_options(test_rt_never_blocks PRIVATE -UNDEBUG)
+    add_test(NAME test_rt_never_blocks COMMAND test_rt_never_blocks)
 endif()

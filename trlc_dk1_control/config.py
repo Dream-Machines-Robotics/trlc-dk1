@@ -31,6 +31,9 @@ class DK1RobotConfig:
 
     # Serial communication
     serial_port: str = "/dev/ttyACM0"
+    # Which arm this is ("left"/"right"; "" for a single arm): tags the RT loop's
+    # log lines ("[left cycle 123] COMM ERROR ...").
+    label: str = ""
     serial_timeout: float = 0.005   # 5 ms — must be short for 250 Hz loop
 
     # Thread rates
@@ -108,6 +111,11 @@ class DK1RobotConfig:
 
     # Communication loss detection
     max_consecutive_empty_cycles: int = 50  # cycles with 0 bytes before comm loss (200ms at 250Hz)
+    # TX side of the comm-loss watchdog: a motor-frame write gets this long before it
+    # fails (the RT thread never blocks on a USB-CAN adapter that stopped draining),
+    # and this many consecutive cycles with a failed write latch comm loss.
+    tx_frame_timeout_us: int = 500
+    max_consecutive_tx_fail_cycles: int = 50
 
     # Shutdown
     disable_torque_on_disconnect: bool = True

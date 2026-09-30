@@ -54,6 +54,34 @@ static size_t send_and_recv(SerialPort& serial, const uint8_t* tx, size_t tx_len
 RtControlLoop::RtControlLoop(const RtLoopConfig& cfg) : cfg_(cfg) {
     disable_torque_on_disconnect_.store(cfg_.disable_torque_on_disconnect,
                                         std::memory_order_relaxed);
+    if (!cfg_.label.empty()) arm_prefix_ = "[" + cfg_.label + "] ";
+}
+
+const char* RtControlLoop::cycle_tag(uint64_t loop_count) {
+    if (cfg_.label.empty()) {
+        std::snprintf(tag_buf_, sizeof(tag_buf_), "[cycle %llu]",
+                      static_cast<unsigned long long>(loop_count));
+    } else {
+        std::snprintf(tag_buf_, sizeof(tag_buf_), "[%s cycle %llu]", cfg_.label.c_str(),
+                      static_cast<unsigned long long>(loop_count));
+    }
+    return tag_buf_;
+}
+
+bool RtControlLoop::send_frame(const uint8_t* frame, bool& cycle_tx_failed) {
+    ++health_rt_.total_tx_frames;
+    if (cycle_tx_failed) {
+        // The adapter already refused a frame this cycle: don't spend the rest of
+        // the cycle's budget waiting on it again.
+        ++health_rt_.total_write_errors;
+        return false;
+    }
+    if (!serial_.write(frame, 30, cfg_.tx_frame_timeout_us)) {
+        ++health_rt_.total_write_errors;
+        cycle_tx_failed = true;
+        return false;
+    }
+    return true;
 }
 
 RtControlLoop::~RtControlLoop() {
@@ -92,7 +120,7 @@ void RtControlLoop::start() {
 
     if (!cfg_.model_path.empty()) {
         if (!grav_comp_.load(cfg_.model_path, 6)) {
-            std::fprintf(stderr, "Warning: gravity compensation disabled (failed to load model)\n");
+            std::fprintf(stderr, "%sWarning: gravity compensation disabled (failed to load model)\n", arm_prefix_.c_str());
         }
     }
 
@@ -110,20 +138,40 @@ void RtControlLoop::start() {
         cmd_seq_.store(s + 2, std::memory_order_release);
     }
 
-    std::fprintf(stderr, "Command buffer initialized to current pos:\n");
+    std::fprintf(stderr, "%sCommand buffer initialized to current pos:\n", arm_prefix_.c_str());
     for (int i = 0; i < 6; ++i) {
-        std::fprintf(stderr, "  joint[%d] q_des=%.4f (from state_buf_.pos=%.4f)\n",
+        std::fprintf(stderr, "%s  joint[%d] q_des=%.4f (from state_buf_.pos=%.4f)\n", arm_prefix_.c_str(),
                      i, cmd_buf_.q_des[static_cast<size_t>(i)],
                      state_buf_.pos[static_cast<size_t>(i)]);
     }
 
+    thread_exited_.store(false, std::memory_order_release);
     running_.store(true, std::memory_order_release);
     thread_ = std::thread(&RtControlLoop::rt_thread_func, this);
 }
 
-void RtControlLoop::stop() {
-    if (!running_.load()) return;
+bool RtControlLoop::stop(int timeout_ms) {
+    if (!running_.load()) return !thread_abandoned_;
     running_.store(false, std::memory_order_release);
+
+    // Bounded join: the thread leaves its loop within one cycle (every write in
+    // it is deadline-bound), but teardown must never hang on an unforeseen block
+    // - a hung stop() once kept a deploy's process alive until SIGKILL
+    // (bumblebee 2026-09-30).
+    const uint64_t deadline = now_ns() + static_cast<uint64_t>(std::max(timeout_ms, 0)) * 1000000ULL;
+    while (!thread_exited_.load(std::memory_order_acquire) && now_ns() < deadline) {
+        sleep_ms(1);
+    }
+    if (!thread_exited_.load(std::memory_order_acquire)) {
+        std::fprintf(stderr,
+                     "%sRtControlLoop: RT thread did not exit within %d ms - abandoning it "
+                     "(port left open, motors keep their last command). The arm's bus is "
+                     "wedged: check its CAN cable/connectors and motor power.\n",
+                     arm_prefix_.c_str(), timeout_ms);
+        thread_abandoned_ = true;
+        if (thread_.joinable()) thread_.detach();
+        return false;
+    }
     if (thread_.joinable()) thread_.join();
 
     uint8_t frame[30];
@@ -139,18 +187,29 @@ void RtControlLoop::stop() {
     // the session layer turns it on only once the arm is parked at its rest
     // pose, so an abort mid-session leaves the motors energised and holding.
     const bool release = disable_torque_on_disconnect_.load(std::memory_order_relaxed);
+    bool released = false;
     if (release) {
+        // Short per-frame deadline: through a wedged adapter the frames cannot
+        // arrive anyway, and waiting would only delay the teardown.
+        released = true;
         for (const auto& m : cfg_.motors) {
             build_disable_frame(frame, m.slave_id);
-            serial_.write(frame, 30);
+            if (!serial_.write(frame, 30, 5000)) {
+                released = false;
+                break;
+            }
         }
         // Brief pause for the last frame to be transmitted over USB
-        sleep_ms(20);
+        if (released) sleep_ms(20);
     }
 
-    serial_.close();
-    std::fprintf(stderr, "RtControlLoop stopped (motors %s)\n",
-                 release ? "released" : "left energised, holding position");
+    const bool closed = serial_.close_bounded(500);
+    std::fprintf(stderr, "%sRtControlLoop stopped (motors %s)%s\n", arm_prefix_.c_str(),
+                 released ? "released"
+                          : release ? "NOT released - the port refused the disable frames"
+                                    : "left energised, holding position",
+                 closed ? "" : " - serial port close timed out (adapter not draining)");
+    return true;
 }
 
 void RtControlLoop::command_joint_pos(const double* q6) {
@@ -309,7 +368,7 @@ void RtControlLoop::configure_motors() {
             build_refresh_frame(frame, m.slave_id);
             send_and_recv(serial_, frame, 30, rx_buf, sizeof(rx_buf), 10000);
         }
-        std::fprintf(stderr, "%s (slave=%d master=0x%02X) connected\n",
+        std::fprintf(stderr, "%s%s (slave=%d master=0x%02X) connected\n", arm_prefix_.c_str(),
                      m.name.c_str(), m.slave_id, m.master_id);
     }
 
@@ -343,8 +402,8 @@ void RtControlLoop::configure_motors() {
 
             // If a motor keeps returning param responses, re-cycle it
             if (round > 0 && param_resp_count[i] >= 2) {
-                std::fprintf(stderr, "  [init round %d] motor %zu (%s) stuck in param mode — "
-                             "disable/re-enable\n", round, i, m.name.c_str());
+                std::fprintf(stderr, "%s  [init round %d] motor %zu (%s) stuck in param mode — "
+                             "disable/re-enable\n", arm_prefix_.c_str(), round, i, m.name.c_str());
                 build_disable_frame(frame, m.slave_id);
                 send_and_recv(serial_, frame, 30, rx_buf, sizeof(rx_buf), 50000);
                 sleep_ms(50);
@@ -361,7 +420,7 @@ void RtControlLoop::configure_motors() {
 
             build_refresh_frame(frame, m.slave_id);
             size_t n = send_and_recv(serial_, frame, 30, rx_buf, sizeof(rx_buf), 10000);
-            std::fprintf(stderr, "  [init round %d] refresh motor %zu (%s): rx %zu bytes\n",
+            std::fprintf(stderr, "%s  [init round %d] refresh motor %zu (%s): rx %zu bytes\n", arm_prefix_.c_str(),
                          round, i, m.name.c_str(), n);
             if (n > 0) {
                 parser_.feed(rx_buf, n);
@@ -373,11 +432,11 @@ void RtControlLoop::configure_motors() {
             uint32_t can_id = decode_can_id(pkt.data());
             uint8_t cmd = decode_cmd(pkt.data());
             if (cmd != 0x11) {
-                std::fprintf(stderr, "  [init] skip packet can_id=0x%03X cmd=0x%02X (not motor state)\n", can_id, cmd);
+                std::fprintf(stderr, "%s  [init] skip packet can_id=0x%03X cmd=0x%02X (not motor state)\n", arm_prefix_.c_str(), can_id, cmd);
                 continue;
             }
             if (is_param_response(pkt.data())) {
-                std::fprintf(stderr, "  [init] skip param response can_id=0x%03X\n", can_id);
+                std::fprintf(stderr, "%s  [init] skip param response can_id=0x%03X\n", arm_prefix_.c_str(), can_id);
                 // Track which motor is stuck
                 for (size_t i = 0; i < 6; ++i) {
                     if (got_initial[i]) continue;
@@ -404,7 +463,7 @@ void RtControlLoop::configure_motors() {
                     state_buf_.torque[i] = st.tau;
                     got_initial[i] = true;
                     ++total_got;
-                    std::fprintf(stderr, "  %s initial pos=%.4f vel=%.4f tau=%.4f (matched can_id=0x%03X)\n",
+                    std::fprintf(stderr, "%s  %s initial pos=%.4f vel=%.4f tau=%.4f (matched can_id=0x%03X)\n", arm_prefix_.c_str(),
                                  m.name.c_str(), st.q, st.dq, st.tau, can_id);
                     break;
                 }
@@ -435,17 +494,17 @@ void RtControlLoop::configure_motors() {
         }
         throw std::runtime_error(msg.str());
     } else if (total_got < 6) {
-        std::fprintf(stderr, "WARNING: only got initial state for %d/6 arm motors (min_required=%d)!\n",
+        std::fprintf(stderr, "%sWARNING: only got initial state for %d/6 arm motors (min_required=%d)!\n", arm_prefix_.c_str(),
                      total_got, cfg_.min_motors_required);
         for (size_t i = 0; i < 6; ++i) {
             if (!got_initial[i]) {
-                std::fprintf(stderr, "  MISSING: %s (slave=%d master=0x%02X) — pos will be 0!\n",
+                std::fprintf(stderr, "%s  MISSING: %s (slave=%d master=0x%02X) — pos will be 0!\n", arm_prefix_.c_str(),
                              cfg_.motors[i].name.c_str(), cfg_.motors[i].slave_id,
                              cfg_.motors[i].master_id);
             }
         }
     } else {
-        std::fprintf(stderr, "All 6 arm motors initial state read successfully\n");
+        std::fprintf(stderr, "%sAll 6 arm motors initial state read successfully\n", arm_prefix_.c_str());
     }
 
     parser_.clear();
@@ -465,7 +524,7 @@ void RtControlLoop::calibrate_gripper() {
     build_enable_frame(frame, gm.slave_id);
     send_and_recv(serial_, frame, 30, rx_buf, sizeof(rx_buf), 100000);
 
-    std::fprintf(stderr, "Gripper calibrating (opening until torque spike)...\n");
+    std::fprintf(stderr, "%sGripper calibrating (opening until torque spike)...\n", arm_prefix_.c_str());
     std::vector<std::array<uint8_t, RX_PACKET_LEN>> packets;
     int cal_iterations = 0;
     constexpr int MAX_CAL_ITERATIONS = 2000;  // ~10s at 5ms per iteration
@@ -494,7 +553,7 @@ void RtControlLoop::calibrate_gripper() {
                     auto st = decode_motor_state(pkt.data(), lim);
                     ++cal_iterations;
                     if (cal_iterations % 20 == 0) {
-                        std::fprintf(stderr, "  gripper cal [%d/%d]: pos=%.3f tau=%.3f (threshold=%.1f)\n",
+                        std::fprintf(stderr, "%s  gripper cal [%d/%d]: pos=%.3f tau=%.3f (threshold=%.1f)\n", arm_prefix_.c_str(),
                                      cal_iterations, MAX_CAL_ITERATIONS, st.q, st.tau, TORQUE_THRESHOLD);
                     }
                     if (st.tau > TORQUE_THRESHOLD) {
@@ -564,14 +623,14 @@ calibration_done:
                 // After set_zero, st.q is near 0.  The offset backs off from
                 // the hard stop so the open position is force-free.
                 gripper_open_pos_ = static_cast<double>(st.q) + cfg_.gripper_open_pos;
-                std::fprintf(stderr, "  gripper read-back: pos=%.4f, open_pos=%.4f (offset=%.3f)\n",
+                std::fprintf(stderr, "%s  gripper read-back: pos=%.4f, open_pos=%.4f (offset=%.3f)\n", arm_prefix_.c_str(),
                              st.q, gripper_open_pos_, cfg_.gripper_open_pos);
                 break;
             }
         }
     }
     parser_.clear();
-    std::fprintf(stderr, "Gripper calibrated: open position = %f\n", gripper_open_pos_);
+    std::fprintf(stderr, "%sGripper calibrated: open position = %f\n", arm_prefix_.c_str(), gripper_open_pos_);
 }
 
 // --- RT thread ---
@@ -589,13 +648,13 @@ calibration_done:
 void RtControlLoop::rt_thread_func() {
     rt_active_ = apply_rt_scheduling(cfg_.rt_priority, cfg_.rt_cpu_affinity, cfg_.rt_use_mlockall, cfg_.loop_hz);
     if (rt_active_) {
-        std::fprintf(stderr, "RT scheduling active (SCHED_FIFO priority %d)\n", cfg_.rt_priority);
+        std::fprintf(stderr, "%sRT scheduling active (SCHED_FIFO priority %d)\n", arm_prefix_.c_str(), cfg_.rt_priority);
     } else {
         // Keep the "RT scheduling not available" prefix — the DreamHub hub greps for
         // it to surface a clear operator warning in the web log.
-        std::fprintf(stderr, "RT scheduling not available, using default scheduler "
+        std::fprintf(stderr, "%sRT scheduling not available, using default scheduler "
                              "(jitter under load; grant rtprio/memlock via "
-                             "utils/workstation_fixes/doctor.sh, then re-login)\n");
+                             "utils/workstation_fixes/doctor.sh, then re-login)\n", arm_prefix_.c_str());
     }
 
     const uint64_t period_ns = static_cast<uint64_t>(1e9 / cfg_.loop_hz);
@@ -630,6 +689,21 @@ void RtControlLoop::rt_thread_func() {
 
     // Comm loss state machine
     bool comm_error_disable_sent = false;
+    // TX watchdog: set when a frame write fails in the current cycle.
+    bool cycle_tx_failed = false;
+
+    // Last consistent command read. A seqlock read that stays torn for all its
+    // retries (the writer preempted mid-write by this SCHED_FIFO thread on the
+    // same core) reuses it. Starting from a default CommandBuffer instead once
+    // commanded q=0 / gripper open for a cycle and logged the command's age as
+    // the machine's uptime ("No command for 270569.42 s", bumblebee 2026-09-30).
+    CommandBuffer last_cmd;
+    for (int attempt = 0; attempt < 1000; ++attempt) {
+        uint64_t s1 = cmd_seq_.load(std::memory_order_acquire);
+        if (s1 & 1) continue;
+        last_cmd = cmd_buf_;
+        if (cmd_seq_.load(std::memory_order_acquire) == s1) break;
+    }
 
     // Command-timeout watchdog: timestamp of the command we last warned about, so
     // the stale-command warning fires once per stale episode (re-arms when a fresh
@@ -641,10 +715,32 @@ void RtControlLoop::rt_thread_func() {
     // actual motor feedback, not zeros.
     constexpr int WARMUP_CYCLES = 10;
 
+    // TX watchdog, run after each cycle's sends: consecutive cycles with a failed
+    // write latch the same comm-loss state as the RX watchdog. Lives in this
+    // thread, so it only works because every write is deadline-bound.
+    auto account_tx = [&]() {
+        if (cycle_tx_failed) {
+            ++health_rt_.consecutive_tx_fail_cycles;
+        } else {
+            health_rt_.consecutive_tx_fail_cycles = 0;
+        }
+        if (loop_count > WARMUP_CYCLES && !health_rt_.comm_loss &&
+            health_rt_.consecutive_tx_fail_cycles >= cfg_.max_consecutive_tx_fail_cycles) {
+            health_rt_.comm_loss = true;
+            health_rt_.tx_stalled = true;
+            comm_error_disable_sent = false;
+            std::fprintf(stderr, "%s COMM ERROR: tx stalled - the adapter took no frame for %d "
+                         "consecutive cycles, entering comm loss state (action=%s)\n",
+                         cycle_tag(loop_count), health_rt_.consecutive_tx_fail_cycles,
+                         cfg_.comm_loss_action == CommLossAction::DISABLE ? "DISABLE" : "HOLD");
+        }
+    };
+
     while (running_.load(std::memory_order_acquire)) {
         uint64_t t0 = now_ns();
         ++loop_count;
         bool debug = false;
+        cycle_tx_failed = false;
 
         // 1. Read responses from PREVIOUS cycle (non-blocking — grab everything available)
         size_t total_rx = 0;
@@ -668,8 +764,7 @@ void RtControlLoop::rt_thread_func() {
         parser_.extract(packets);
 
         if (debug) {
-            std::fprintf(stderr, "[cycle %llu] rx_bytes=%zu packets=%zu\n",
-                         (unsigned long long)loop_count, total_rx, packets.size());
+            std::fprintf(stderr, "%s rx_bytes=%zu packets=%zu\n", cycle_tag(loop_count), total_rx, packets.size());
         }
 
         uint8_t motor_responded = 0;  // bitmask, bit i = motor i responded this cycle
@@ -678,7 +773,7 @@ void RtControlLoop::rt_thread_func() {
             uint32_t can_id = decode_can_id(pkt.data());
             uint8_t pkt_cmd = decode_cmd(pkt.data());
             if (pkt_cmd != 0x11) {
-                if (debug) std::fprintf(stderr, "  skip pkt can_id=0x%03X cmd=0x%02X\n", can_id, pkt_cmd);
+                if (debug) std::fprintf(stderr, "%s  skip pkt can_id=0x%03X cmd=0x%02X\n", arm_prefix_.c_str(), can_id, pkt_cmd);
                 continue;
             }
             if (is_param_response(pkt.data())) continue;
@@ -697,14 +792,14 @@ void RtControlLoop::rt_thread_func() {
                     if (i < 7) motor_responded |= (1u << i);
                     matched = true;
                     if (debug) {
-                        std::fprintf(stderr, "  motor[%zu] %s: pos=%.4f vel=%.4f tau=%.4f (can_id=0x%03X)\n",
+                        std::fprintf(stderr, "%s  motor[%zu] %s: pos=%.4f vel=%.4f tau=%.4f (can_id=0x%03X)\n", arm_prefix_.c_str(),
                                      i, m.name.c_str(), st.q, st.dq, st.tau, can_id);
                     }
                     break;
                 }
             }
             if (!matched && debug) {
-                std::fprintf(stderr, "  UNMATCHED pkt can_id=0x%03X\n", can_id);
+                std::fprintf(stderr, "%s  UNMATCHED pkt can_id=0x%03X\n", arm_prefix_.c_str(), can_id);
             }
         }
 
@@ -727,9 +822,8 @@ void RtControlLoop::rt_thread_func() {
                 if (health_rt_.consecutive_empty_cycles >= cfg_.max_consecutive_empty_cycles) {
                     health_rt_.comm_loss = true;
                     comm_error_disable_sent = false;
-                    std::fprintf(stderr, "[cycle %llu] COMM ERROR: %d consecutive empty cycles, "
-                                 "entering comm loss state (action=%s)\n",
-                                 (unsigned long long)loop_count,
+                    std::fprintf(stderr, "%s COMM ERROR: %d consecutive empty cycles, "
+                                 "entering comm loss state (action=%s)\n", cycle_tag(loop_count),
                                  health_rt_.consecutive_empty_cycles,
                                  cfg_.comm_loss_action == CommLossAction::DISABLE ? "DISABLE" : "HOLD");
                 }
@@ -776,13 +870,10 @@ void RtControlLoop::rt_thread_func() {
             for (size_t i = 0; i < cfg_.motors.size(); ++i) {
                 const auto& m = cfg_.motors[i];
                 build_refresh_frame(tx_frame, m.slave_id);
-                if (!serial_.write(tx_frame, 30)) {
-                    ++health_rt_.total_write_errors;
-                }
-                ++health_rt_.total_tx_frames;
+                send_frame(tx_frame, cycle_tx_failed);
             }
             if (debug) {
-                std::fprintf(stderr, "  [warmup %llu/%d] sent refresh frames, cur_pos=[",
+                std::fprintf(stderr, "%s  [warmup %llu/%d] sent refresh frames, cur_pos=[", arm_prefix_.c_str(),
                              (unsigned long long)loop_count, WARMUP_CYCLES);
                 for (int i = 0; i < 6; ++i) std::fprintf(stderr, "%.4f%s", cur_pos[static_cast<size_t>(i)], i<5?", ":"");
                 std::fprintf(stderr, "]\n");
@@ -807,8 +898,9 @@ void RtControlLoop::rt_thread_func() {
                 // Reset comm counters so warmup's empty cycles don't trigger comm loss
                 health_rt_.consecutive_empty_cycles = 0;
 
-                std::fprintf(stderr, "  [warmup done] command buffer and slew target initialized to actual pos\n");
+                std::fprintf(stderr, "%s  [warmup done] command buffer and slew target initialized to actual pos\n", arm_prefix_.c_str());
             }
+            account_tx();
 
             uint64_t t1 = now_ns();
             double cycle_us = static_cast<double>(t1 - t0) / 1000.0;
@@ -826,6 +918,8 @@ void RtControlLoop::rt_thread_func() {
             safety_state_.overspeed_count = 0;
             health_rt_.comm_loss = false;
             health_rt_.consecutive_empty_cycles = 0;
+            health_rt_.tx_stalled = false;
+            health_rt_.consecutive_tx_fail_cycles = 0;
             comm_error_disable_sent = false;
             // Snap slew target to current position to prevent jump after reset
             for (int i = 0; i < 6; ++i) {
@@ -833,19 +927,22 @@ void RtControlLoop::rt_thread_func() {
                 slew_step_prev_[static_cast<size_t>(i)] = 0.0;
             }
             error_reset_ack_.fetch_add(1, std::memory_order_release);
-            std::fprintf(stderr, "[cycle %llu] Error reset acknowledged\n",
-                         (unsigned long long)loop_count);
+            std::fprintf(stderr, "%s Error reset acknowledged\n", cycle_tag(loop_count));
         }
 
-        // 5. Read commands (seqlock)
-        CommandBuffer cmd;
-        for (int attempt = 0; attempt < 100; ++attempt) {
+        // 5. Read commands (seqlock); a read torn for every retry keeps last_cmd
+        bool cmd_ok = false;
+        for (int attempt = 0; attempt < 100 && !cmd_ok; ++attempt) {
             uint64_t s1 = cmd_seq_.load(std::memory_order_acquire);
             if (s1 & 1) continue;
-            cmd = cmd_buf_;
-            uint64_t s2 = cmd_seq_.load(std::memory_order_acquire);
-            if (s1 == s2) break;
+            CommandBuffer snap = cmd_buf_;
+            if (cmd_seq_.load(std::memory_order_acquire) == s1) {
+                last_cmd = snap;
+                cmd_ok = true;
+            }
         }
+        if (!cmd_ok) ++health_rt_.torn_command_reads;
+        const CommandBuffer& cmd = last_cmd;
 
         // 6. Watchdog
         // On a stale command, KEEP HOLDING the last commanded target (cmd.q_des, which
@@ -864,8 +961,8 @@ void RtControlLoop::rt_thread_func() {
         if (cmd_age_s > cfg_.command_timeout_s) {
             if (cmd.timestamp_ns != last_stale_warn_cmd_ts) {
                 std::fprintf(stderr,
-                             "[cycle %llu] No command for %.2f s — holding last commanded target\n",
-                             (unsigned long long)loop_count, cmd_age_s);
+                             "%s No command for %.2f s — holding last commanded target\n",
+                             cycle_tag(loop_count), cmd_age_s);
                 last_stale_warn_cmd_ts = cmd.timestamp_ns;
             }
         }
@@ -920,7 +1017,7 @@ void RtControlLoop::rt_thread_func() {
         health_rt_.overspeed_count = safety_state_.overspeed_count;
 
         if (debug) {
-            std::fprintf(stderr, "  [cycle %llu] q_des=[", (unsigned long long)loop_count);
+            std::fprintf(stderr, "  %s q_des=[", cycle_tag(loop_count));
             for (int i = 0; i < 6; ++i) std::fprintf(stderr, "%.4f%s", q_des[static_cast<size_t>(i)], i<5?", ":"");
             std::fprintf(stderr, "] cur_pos=[");
             for (int i = 0; i < 6; ++i) std::fprintf(stderr, "%.4f%s", cur_pos[static_cast<size_t>(i)], i<5?", ":"");
@@ -935,10 +1032,7 @@ void RtControlLoop::rt_thread_func() {
                 // Send disable frames ONCE when first entering error state
                 for (size_t i = 0; i < cfg_.motors.size(); ++i) {
                     build_disable_frame(tx_frame, cfg_.motors[i].slave_id);
-                    if (!serial_.write(tx_frame, 30)) {
-                        ++health_rt_.total_write_errors;
-                    }
-                    ++health_rt_.total_tx_frames;
+                    send_frame(tx_frame, cycle_tx_failed);
                 }
                 comm_error_disable_sent = true;
             } else if (cfg_.comm_loss_action == CommLossAction::HOLD) {
@@ -951,10 +1045,7 @@ void RtControlLoop::rt_thread_func() {
                                    static_cast<float>(cfg_.default_kd[i]),
                                    static_cast<float>(cur_pos[i]),
                                    0.0f, 0.0f, lim);
-                    if (!serial_.write(tx_frame, 30)) {
-                        ++health_rt_.total_write_errors;
-                    }
-                    ++health_rt_.total_tx_frames;
+                    send_frame(tx_frame, cycle_tx_failed);
                 }
             }
             // In DISABLE mode after first cycle: send nothing (motors already disabled)
@@ -970,10 +1061,7 @@ void RtControlLoop::rt_thread_func() {
                                0.0f,
                                static_cast<float>(tau_ff[i]),
                                lim);
-                if (!serial_.write(tx_frame, 30)) {
-                    ++health_rt_.total_write_errors;
-                }
-                ++health_rt_.total_tx_frames;
+                send_frame(tx_frame, cycle_tx_failed);
             }
 
             if (cfg_.motors.size() >= 7) {
@@ -984,12 +1072,11 @@ void RtControlLoop::rt_thread_func() {
                                 static_cast<float>(gripper_q),
                                 static_cast<float>(gripper_vel_emit),
                                 static_cast<float>(gripper_i_des_emit));
-                if (!serial_.write(tx_frame, 30)) {
-                    ++health_rt_.total_write_errors;
-                }
-                ++health_rt_.total_tx_frames;
+                send_frame(tx_frame, cycle_tx_failed);
             }
         }
+
+        account_tx();
 
         // 11. Record perf
         uint64_t t1 = now_ns();
@@ -1003,6 +1090,7 @@ void RtControlLoop::rt_thread_func() {
         }
         sleep_until_ns(next_wakeup);
     }
+    thread_exited_.store(true, std::memory_order_release);
 }
 
 } // namespace trlc
