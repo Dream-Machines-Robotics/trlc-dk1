@@ -72,6 +72,7 @@ class BiDK1Follower(Robot):
 
         left_arm_config = DK1FollowerConfig(
             port=self.config.left_arm_port,
+            label="left",
             disable_torque_on_disconnect=self.config.disable_torque_on_disconnect,
             joint_velocity_scaling=self.config.joint_velocity_scaling,
             joint_accel_limit=self.config.joint_accel_limit,
@@ -80,6 +81,7 @@ class BiDK1Follower(Robot):
         )
         right_arm_config = DK1FollowerConfig(
             port=self.config.right_arm_port,
+            label="right",
             disable_torque_on_disconnect=self.config.disable_torque_on_disconnect,
             joint_velocity_scaling=self.config.joint_velocity_scaling,
             joint_accel_limit=self.config.joint_accel_limit,

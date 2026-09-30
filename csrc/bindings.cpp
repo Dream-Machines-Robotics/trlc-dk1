@@ -58,6 +58,9 @@ NB_MODULE(_trlc_dk1_rt, m) {
     nb::class_<RtLoopConfig>(m, "RtLoopConfig")
         .def(nb::init<>())
         .def_rw("serial_port", &RtLoopConfig::serial_port)
+        .def_rw("label", &RtLoopConfig::label)
+        .def_rw("tx_frame_timeout_us", &RtLoopConfig::tx_frame_timeout_us)
+        .def_rw("max_consecutive_tx_fail_cycles", &RtLoopConfig::max_consecutive_tx_fail_cycles)
         .def_rw("loop_hz", &RtLoopConfig::loop_hz)
         .def_rw("motors", &RtLoopConfig::motors)
         .def_rw("limit_buffer", &RtLoopConfig::limit_buffer)
@@ -181,6 +184,9 @@ NB_MODULE(_trlc_dk1_rt, m) {
         .def_ro("total_tx_frames", &HealthState::total_tx_frames)
         .def_ro("total_write_errors", &HealthState::total_write_errors)
         .def_ro("loop_count", &HealthState::loop_count)
+        .def_ro("tx_stalled", &HealthState::tx_stalled)
+        .def_ro("consecutive_tx_fail_cycles", &HealthState::consecutive_tx_fail_cycles)
+        .def_ro("torn_command_reads", &HealthState::torn_command_reads)
         .def_prop_ro("motor_last_seen_cycle", [](const HealthState& h) {
             return nb::ndarray<nb::numpy, const uint64_t, nb::shape<7>>(
                 h.motor_last_seen_cycle.data(), {7});
@@ -194,8 +200,14 @@ NB_MODULE(_trlc_dk1_rt, m) {
     // RtControlLoop
     nb::class_<RtControlLoop>(m, "RtControlLoop")
         .def(nb::init<const RtLoopConfig&>())
-        .def("start", &RtControlLoop::start)
-        .def("stop", &RtControlLoop::stop)
+        // start/stop/reset_* wait (motor setup, thread exit, RT-thread acks) and touch
+        // no Python objects: release the GIL so a slow or wedged arm can never freeze
+        // the interpreter - other threads and signal handlers keep running.
+        .def("start", &RtControlLoop::start, nb::call_guard<nb::gil_scoped_release>())
+        .def("stop", &RtControlLoop::stop, nb::arg("timeout_ms") = 2000,
+             nb::call_guard<nb::gil_scoped_release>(),
+             "Stop the RT thread and close the port; returns within ~timeout_ms. False = "
+             "the thread did not exit and was abandoned - keep this object alive.")
         .def("command_joint_pos", [](RtControlLoop& loop,
                 nb::ndarray<nb::numpy, const double, nb::shape<6>> q) {
             loop.command_joint_pos(q.data());
@@ -216,7 +228,8 @@ NB_MODULE(_trlc_dk1_rt, m) {
              "is the latest sample at-or-before the requested time; None if no "
              "such sample is available in the ~1s ring of recent state.")
         .def("get_health", &RtControlLoop::get_health)
-        .def("reset_errors", &RtControlLoop::reset_errors, nb::arg("timeout_ms") = 100)
+        .def("reset_errors", &RtControlLoop::reset_errors, nb::arg("timeout_ms") = 100,
+             nb::call_guard<nb::gil_scoped_release>())
         .def("set_accel_guard", &RtControlLoop::set_accel_guard, nb::arg("on"),
              "Enable/disable the acceleration guard on the slew ramp at runtime "
              "(off = slew_step sees max_accel 0.0; the slew-rate cap stays active).")
@@ -238,7 +251,8 @@ NB_MODULE(_trlc_dk1_rt, m) {
             nb::capsule owner(data, [](void* p) noexcept { delete[] static_cast<float*>(p); });
             return nb::ndarray<nb::numpy, float>(data, {n}, owner);
         })
-        .def("reset_perf", &RtControlLoop::reset_perf, nb::arg("timeout_ms") = 100)
+        .def("reset_perf", &RtControlLoop::reset_perf, nb::arg("timeout_ms") = 100,
+             nb::call_guard<nb::gil_scoped_release>())
         .def("is_running", &RtControlLoop::is_running)
         .def("is_rt_active", &RtControlLoop::is_rt_active);
 

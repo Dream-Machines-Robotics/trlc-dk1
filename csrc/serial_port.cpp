@@ -3,8 +3,15 @@
 #include <cerrno>
 #include <cstdio>
 #include <cstring>
+#include <algorithm>
+#include <atomic>
+#include <memory>
+#include <thread>
+
 #include <fcntl.h>
+#include <poll.h>
 #include <sys/select.h>
+#include <time.h>
 #include <termios.h>
 #include <unistd.h>
 
@@ -24,9 +31,10 @@ bool SerialPort::open(const std::string& device, int baudrate) {
         return false;
     }
 
-    // Clear O_NONBLOCK after open (we want blocking writes, non-blocking reads via VMIN/VTIME)
-    int flags = fcntl(fd_, F_GETFL, 0);
-    fcntl(fd_, F_SETFL, flags & ~O_NONBLOCK);
+    // O_NONBLOCK stays set: reads are non-blocking anyway (VMIN=VTIME=0) and
+    // writes must never block the RT thread - write() waits with poll() and a
+    // deadline instead. A blocking ::write() here once froze an arm's control
+    // thread for good when its adapter stopped draining (bumblebee 2026-09-30).
 
     struct termios tty{};
     if (tcgetattr(fd_, &tty) != 0) {
@@ -96,16 +104,40 @@ void SerialPort::close() {
     }
 }
 
-bool SerialPort::write(const uint8_t* buf, size_t n) {
+static int64_t mono_us() {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return static_cast<int64_t>(ts.tv_sec) * 1000000 + ts.tv_nsec / 1000;
+}
+
+bool SerialPort::write(const uint8_t* buf, size_t n, int timeout_us) {
     if (fd_ < 0) return false;
+    const int64_t deadline = mono_us() + std::max(timeout_us, 0);
     size_t written = 0;
     while (written < n) {
         ssize_t r = ::write(fd_, buf + written, n - written);
-        if (r < 0) {
-            if (errno == EINTR) continue;
-            return false;
+        if (r > 0) {
+            written += static_cast<size_t>(r);
+            continue;
         }
-        written += static_cast<size_t>(r);
+        if (r < 0 && errno == EINTR) continue;
+        if (r < 0 && errno != EAGAIN && errno != EWOULDBLOCK) return false;
+        // Output buffer full: wait for room, but only until the deadline.
+        const int64_t left_us = deadline - mono_us();
+        if (left_us <= 0) return false;
+        struct pollfd pfd = {fd_, POLLOUT, 0};
+#ifdef __linux__
+        // ppoll: microsecond deadline (poll()'s ms granularity would turn the RT
+        // loop's 500 us budget into 1 ms).
+        struct timespec ts = {static_cast<time_t>(left_us / 1000000),
+                              static_cast<long>((left_us % 1000000) * 1000)};
+        const int ret = ::ppoll(&pfd, 1, &ts, nullptr);
+#else
+        const int ret = ::poll(&pfd, 1, static_cast<int>((left_us + 999) / 1000));
+#endif
+        if (ret < 0 && errno != EINTR) return false;
+        if (ret == 0 && mono_us() >= deadline) return false;
+        if (ret > 0 && (pfd.revents & (POLLERR | POLLHUP | POLLNVAL))) return false;
     }
     return true;
 }
@@ -150,10 +182,29 @@ size_t SerialPort::read_with_timeout(uint8_t* buf, size_t max, int timeout_us) {
     return total;
 }
 
-void SerialPort::drain() {
-    if (fd_ >= 0) {
-        tcdrain(fd_);
+bool SerialPort::close_bounded(int timeout_ms) {
+    if (fd_ < 0) return true;
+    const int fd = fd_;
+    fd_ = -1;
+    // Drop whatever the device never took, so close() has nothing to wait for
+    // (drivers that honour TCOFLUSH); the helper thread covers those that don't.
+    tcflush(fd, TCOFLUSH);
+    auto done = std::make_shared<std::atomic<bool>>(false);
+    std::thread closer([fd, done] {
+        ::close(fd);
+        done->store(true, std::memory_order_release);
+    });
+    const int64_t deadline = mono_us() + static_cast<int64_t>(std::max(timeout_ms, 0)) * 1000;
+    while (!done->load(std::memory_order_acquire) && mono_us() < deadline) {
+        struct timespec ts = {0, 1000000};  // 1 ms
+        nanosleep(&ts, nullptr);
     }
+    if (done->load(std::memory_order_acquire)) {
+        closer.join();
+        return true;
+    }
+    closer.detach();  // owns only the fd number + the shared flag: safe to outlive us
+    return false;
 }
 
 } // namespace trlc
