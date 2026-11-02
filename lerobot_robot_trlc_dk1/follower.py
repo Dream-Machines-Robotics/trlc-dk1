@@ -14,6 +14,7 @@
 
 from dataclasses import dataclass, field
 from functools import cached_property
+import os
 import serial
 import time
 import logging
@@ -101,6 +102,17 @@ class DK1Follower(Robot):
 
         self.cameras = make_cameras_from_configs(config.cameras)
 
+        # Observation alignment, same toggle + semantics as BiDK1Follower
+        # (LEROBOT_OBS_ALIGN=1): a single arm that owns cameras picks the newest
+        # camera kernel capture timestamp as the reference time T and samples its
+        # motors (RT state ring) and every camera at-or-before T. An arm with no
+        # cameras (the bimanual follower's inner arms) never derives a T itself —
+        # its parent passes one in.
+        _align_env = os.environ.get("LEROBOT_OBS_ALIGN", "0").strip().lower()
+        self._align_observations = _align_env in ("1", "true", "yes", "on")
+        self._last_observation_ref_ts_ns: int | None = None
+        self._last_camera_capture_ts_ns: int | None = None
+
     @property
     def _motors_ft(self) -> dict[str, type]:
         return {f"{motor}.pos": float for motor in self.motors}
@@ -150,8 +162,29 @@ class DK1Follower(Robot):
             self.bus_connected = True
             self.configure()
 
-        for cam in self.cameras.values():
-            cam.connect()
+        connected: list = []
+        try:
+            for name, cam in self.cameras.items():
+                try:
+                    cam.connect()
+                except Exception as e:
+                    # The camera's own error only knows its /dev path — prefix the
+                    # config key ("top" / "left_wrist" / ...) so the operator knows
+                    # which camera to reconnect (same as BiDK1Follower.connect).
+                    msg = e.args[0] if e.args else str(e)
+                    e.args = (f"camera '{name}' failed to connect — {msg}", *e.args[1:])
+                    raise
+                connected.append(cam)
+        except Exception:
+            # Don't leave the RT loop (or the serial bus) running behind a failed
+            # connect: the caller sees an exception and never calls disconnect().
+            for cam in connected:
+                try:
+                    cam.disconnect()
+                except Exception:  # noqa: BLE001 — best effort, the original error wins
+                    logger.debug("%s: camera cleanup after a failed connect raised", self, exc_info=True)
+            self._disconnect_bus()
+            raise
 
     def _connect_rt(self) -> None:
         """Connect using the C++ RT control loop."""
@@ -271,8 +304,81 @@ class DK1Follower(Robot):
         if not self.is_connected:
             raise DeviceNotConnectedError(f"{self} is not connected.")
 
+        # Camera reference time. Only an arm that owns cameras derives one (a
+        # bimanual inner arm has none and gets ``ref_ts_ns`` from its parent).
+        # Tracked whenever the cameras expose kernel timestamps (cpp backend) so
+        # the timing side-file / RTC obs-age compensation work with OBS_ALIGN off
+        # too; APPLIED as the reference only when alignment is on.
+        if self.cameras:
+            cam_ts: list[int] = []
+            for cam in self.cameras.values():
+                get_ts = getattr(cam, "latest_capture_time_ns", None)
+                ts = get_ts() if get_ts is not None else None
+                if ts is None:
+                    cam_ts = []
+                    break
+                cam_ts.append(ts)
+            cam_capture_ts_ns = max(cam_ts) if cam_ts else None
+            if ref_ts_ns is None and self._align_observations:
+                ref_ts_ns = cam_capture_ts_ns
+            self._last_camera_capture_ts_ns = cam_capture_ts_ns
+            self._last_observation_ref_ts_ns = ref_ts_ns
+
+        obs_dict = self._read_motors(ref_ts_ns)
+
+        # Capture images from cameras — use read_at_or_before() when alignment
+        # is requested and the camera supports it; fall back to read_latest()
+        # otherwise (e.g. OpenCVCamera doesn't carry kernel timestamps).
+        for cam_key, cam in self.cameras.items():
+            start = time.perf_counter()
+            frame = None
+            if ref_ts_ns is not None and hasattr(cam, "read_at_or_before"):
+                frame = cam.read_at_or_before(ref_ts_ns)
+            if frame is None:
+                frame = cam.read_latest()
+            obs_dict[cam_key] = frame
+            dt_ms = (time.perf_counter() - start) * 1e3
+            logger.debug(f"{self} read {cam_key}: {dt_ms:.1f}ms")
+
+        return obs_dict
+
+    def get_proprioception(self, ref_ts_ns: int | None = None) -> dict[str, Any]:
+        """Joint/gripper observation only — no camera reads.
+
+        Same keys and representation as ``get_observation()`` minus the images
+        (``joint_1.pos`` … ``gripper.pos``, gripper normalized), so the high-rate
+        state publishers (record's and DAgger's ~250 Hz .rrd state) sample the RT
+        state ring without touching the cameras the recorder captures
+        out-of-process — and keep sampling through a camera stall. With
+        ``ref_ts_ns`` the joints are the RT-ring sample at-or-before it. Mirrors
+        ``BiDK1Follower.get_proprioception``. Needs only the arm (bus / RT loop),
+        not the cameras.
+        """
+        if not (self.bus_connected or self._rt_robot is not None):
+            raise DeviceNotConnectedError(f"{self} is not connected.")
+        return self._read_motors(ref_ts_ns)
+
+    @property
+    def last_observation_ref_ts_ns(self) -> int | None:
+        """Reference time *applied* by the most recent ``get_observation()``
+        (``None`` with alignment off or no camera timestamps). Mirrors
+        ``BiDK1Follower.last_observation_ref_ts_ns``."""
+        return self._last_observation_ref_ts_ns
+
+    @property
+    def last_camera_capture_ts_ns(self) -> int | None:
+        """Newest camera kernel capture timestamp seen by the most recent
+        ``get_observation()``, regardless of the alignment toggle (``None`` for
+        the opencv backend / before the first frame). The rollout's RTC engine
+        uses it for observation-age compensation and the timing side-files
+        record it. Mirrors ``BiDK1Follower.last_camera_capture_ts_ns``."""
+        return self._last_camera_capture_ts_ns
+
+    def _read_motors(self, ref_ts_ns: int | None = None) -> dict[str, Any]:
+        """The motor block of an observation (``<motor>.pos``), RT-ring aligned to
+        ``ref_ts_ns`` when given and available, else the latest sample."""
         start = time.perf_counter()
-        obs_dict = {}
+        obs_dict: dict[str, Any] = {}
 
         if self._rt_robot is not None:
             motor_names = ["joint_1", "joint_2", "joint_3", "joint_4", "joint_5", "joint_6"]
@@ -307,25 +413,14 @@ class DK1Follower(Robot):
 
         dt_ms = (time.perf_counter() - start) * 1e3
         logger.debug(f"{self} read state: {dt_ms:.1f}ms")
-
-        # Capture images from cameras — use read_at_or_before() when alignment
-        # is requested and the camera supports it; fall back to read_latest()
-        # otherwise (e.g. OpenCVCamera doesn't carry kernel timestamps).
-        for cam_key, cam in self.cameras.items():
-            start = time.perf_counter()
-            frame = None
-            if ref_ts_ns is not None and hasattr(cam, "read_at_or_before"):
-                frame = cam.read_at_or_before(ref_ts_ns)
-            if frame is None:
-                frame = cam.read_latest()
-            obs_dict[cam_key] = frame
-            dt_ms = (time.perf_counter() - start) * 1e3
-            logger.debug(f"{self} read {cam_key}: {dt_ms:.1f}ms")
-
         return obs_dict
 
     def send_action(self, action: dict[str, Any]) -> dict[str, Any]:
-        if not self.is_connected:
+        # The ARM must be connected, not the cameras (``is_connected`` folds them
+        # in): the session-end park drives the arm home after a hub stop already
+        # killed the capture daemons. A bimanual follower's inner arms own no
+        # cameras, so this is what they always did.
+        if not (self.bus_connected or self._rt_robot is not None):
             raise DeviceNotConnectedError(f"{self} is not connected.")
 
         goal_pos = {key.removesuffix(
@@ -405,10 +500,9 @@ class DK1Follower(Robot):
             return self._rt_robot.set_disable_torque_on_disconnect(enabled)
         return self.bus_connected
 
-    def disconnect(self):
-        if not self.is_connected:
-            raise DeviceNotConnectedError(f"{self} is not connected.")
-
+    def _disconnect_bus(self) -> None:
+        """Stop the RT loop / close the serial bus (honouring the runtime
+        release-on-disconnect choice). Idempotent."""
         if self._rt_robot is not None:
             self._rt_robot.disconnect()
             self._rt_robot = None
@@ -417,9 +511,25 @@ class DK1Follower(Robot):
                 for motor in self.motors.values():
                     self.control.disable(motor)
             self.control.serial_.close()
+            self.control = None
         self.bus_connected = False
 
-        for cam in self.cameras.values():
+    def disconnect(self):
+        # ``is_connected`` folds the cameras in, and at session end a camera is
+        # often already gone (SIGINT killed its capture daemon, or it died
+        # mid-run). The arm must still be disconnected then — RT loop stopped,
+        # motors released if the park armed it — instead of refusing and leaving
+        # the loop to die with the process. Same as BiDK1Follower, which
+        # disconnects its arms regardless of camera state. Raise only when
+        # nothing at all is connected.
+        bus_up = self.bus_connected or self._rt_robot is not None
+        cams_up = [cam for cam in self.cameras.values() if cam.is_connected]
+        if not bus_up and not cams_up:
+            raise DeviceNotConnectedError(f"{self} is not connected.")
+
+        self._disconnect_bus()
+
+        for cam in cams_up:
             cam.disconnect()
 
         logger.info(f"{self} disconnected.")
