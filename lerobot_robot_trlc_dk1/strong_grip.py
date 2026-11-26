@@ -3,16 +3,20 @@
 Behind the session dev toggle ``strong-grip-right`` (dreamhub/dev-toggles.json):
 the hub puts the starting member's session toggles in ``DM_DEV_TOGGLES`` when
 it spawns a run. The leader's full close sends 1.0, where the fingertips only
-just touch, so there is almost no squeeze. With the toggle on, the right
-gripper's motor target is the commanded value stretched uniformly by
-``STRONG_GRIP_RIGHT_CLOSE_TARGET`` (default 1.10: 0 stays 0, 0.5 becomes 0.55,
-1.0 becomes 1.10), and its current limit is ``STRONG_GRIP_RIGHT_TORQUE_NM``
-(default 1.0 Nm, the same as without the toggle; cap 3) for the whole run.
+just touch, so there is almost no squeeze.
 
-Commands and recorded actions stay in 0..1. The measured gripper position is
-reported as it is: with the toggle on its upper clamp at 1.0 is lifted, so
-observations and recordings show readings up to about 1.1. The C++ loop does
-the scaling and the reporting (csrc/strong_grip.h, control_loop.cpp).
+With the toggle on:
+
+- VR teleop (scripts/vr_teleop/teleop/bi_quest_teleop.py) stretches the right
+  gripper action uniformly by ``STRONG_GRIP_RIGHT_CLOSE_TARGET`` (default 1.10:
+  0 stays 0, 0.5 becomes 0.55, 1.0 becomes 1.10). The stretch happens where the
+  action is made, so the recorded action equals what the follower is sent, and
+  a policy trained on such data outputs 0..1.10 itself. The DK1 leader is not
+  stretched.
+- The right follower's RT loop accepts gripper commands up to 1.15 instead of
+  1.0, uses ``STRONG_GRIP_RIGHT_TORQUE_NM`` (default 1.0 Nm, the same as without
+  the toggle; cap 3) as its gripper limit, and reports the measured position
+  without its upper clamp at 1.0 (csrc/strong_grip.h, control_loop.cpp).
 
 Both values come from the environment (the ledream Makefile exports them, so a
 rig can override them in /etc/dreammachines/workstation.mk). Invalid values
@@ -74,6 +78,6 @@ def right_arm_settings(environ: dict[str, str] | None = None) -> tuple[float, fl
     except ValueError as e:
         logger.warning("dev toggle %s is on, but %s. Strong grip stays OFF", TOGGLE, e)
         return None
-    logger.warning("dev toggle %s: right gripper target = command x %.3f, limit %.2f Nm",
+    logger.warning("dev toggle %s: right gripper VR action x %.3f, follower limit %.2f Nm",
                    TOGGLE, close_target, torque)
     return torque, close_target

@@ -158,7 +158,6 @@ class DK1RobotRT:
             # Set only when on, so the default path never touches the new fields
             # (an extension built before them raises here, loudly, only when used).
             rt_cfg.strong_gripper_torque_nm = config.strong_gripper_torque_nm
-            rt_cfg.strong_gripper_close_target = config.strong_gripper_close_target
         rt_cfg.torque_constant = config.DM4310_TORQUE_CONSTANT
         rt_cfg.emit_velocity_scale = config.EMIT_VELOCITY_SCALE
         rt_cfg.emit_current_scale = config.EMIT_CURRENT_SCALE

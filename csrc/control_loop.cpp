@@ -113,12 +113,6 @@ void RtControlLoop::start() {
                                     std::to_string(kStrongGripMaxNm) + "] Nm, got: " +
                                     std::to_string(cfg_.strong_gripper_torque_nm));
     }
-    if (cfg_.strong_gripper_torque_nm > 0.0 &&
-        (cfg_.strong_gripper_close_target < 1.0 || cfg_.strong_gripper_close_target > kStrongGripMaxCloseTarget)) {
-        throw std::invalid_argument("strong_gripper_close_target must be in [1, " +
-                                    std::to_string(kStrongGripMaxCloseTarget) + "], got: " +
-                                    std::to_string(cfg_.strong_gripper_close_target));
-    }
     if (cfg_.min_motors_required < 0 || cfg_.min_motors_required > 6) {
         throw std::invalid_argument("min_motors_required must be in [0, 6], got: " +
                                     std::to_string(cfg_.min_motors_required));
@@ -126,6 +120,7 @@ void RtControlLoop::start() {
 
     gripper_obs_max_ = cfg_.strong_gripper_torque_nm > 0.0
         ? std::numeric_limits<double>::infinity() : 1.0;
+    gripper_cmd_max_ = strong_grip_cmd_max(cfg_.strong_gripper_torque_nm > 0.0);
 
     if (!serial_.open(cfg_.serial_port, 921600)) {
         throw std::runtime_error("Failed to open serial port: " + cfg_.serial_port);
@@ -237,7 +232,7 @@ void RtControlLoop::command_joint_pos(const double* q6) {
 }
 
 void RtControlLoop::command_gripper(double normalized) {
-    normalized = std::clamp(normalized, 0.0, 1.0);
+    normalized = std::clamp(normalized, 0.0, gripper_cmd_max_);
     uint64_t s = cmd_seq_.load(std::memory_order_relaxed);
     cmd_seq_.store(s + 1, std::memory_order_release);
     cmd_buf_.gripper_des = normalized;
@@ -704,9 +699,9 @@ void RtControlLoop::rt_thread_func() {
     const bool strong_grip_on = cfg_.strong_gripper_torque_nm > 0.0;
     if (strong_grip_on) {
         gripper_i_des_emit = cfg_.strong_gripper_torque_nm / cfg_.torque_constant * cfg_.emit_current_scale;
-        std::fprintf(stderr, "%sStrong grip ON: gripper limit %.2f Nm (base %.2f Nm), target = command x %.3f\n",
+        std::fprintf(stderr, "%sStrong grip ON: gripper limit %.2f Nm (base %.2f Nm), commands up to %.2f\n",
                      arm_prefix_.c_str(), cfg_.strong_gripper_torque_nm, cfg_.max_gripper_torque_nm,
-                     cfg_.strong_gripper_close_target);
+                     gripper_cmd_max_);
     }
 
     uint64_t loop_count = 0;
@@ -1090,10 +1085,8 @@ void RtControlLoop::rt_thread_func() {
 
             if (cfg_.motors.size() >= 7) {
                 const auto& gm = cfg_.motors[6];
-                // strong_grip_target() is the identity when strong grip is off.
                 double gripper_q = gripper_open_pos_ +
-                    strong_grip_target(cmd.gripper_des, strong_grip_on, cfg_.strong_gripper_close_target) *
-                    (cfg_.gripper_closed_pos - gripper_open_pos_);
+                    cmd.gripper_des * (cfg_.gripper_closed_pos - gripper_open_pos_);
                 build_emit_frame(tx_frame, gm.slave_id,
                                 static_cast<float>(gripper_q),
                                 static_cast<float>(gripper_vel_emit),
