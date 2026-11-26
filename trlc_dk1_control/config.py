@@ -124,6 +124,13 @@ class DK1RobotConfig:
     gripper_open_pos: float = 0.0     # rad offset from hard stop after calibration
     gripper_closed_pos: float = -4.7  # rad
     max_gripper_torque_nm: float = 1.0
+    # Strong grip near closed (csrc/strong_grip.h): 0 = off. While the measured
+    # gripper is closed past strong_gripper_min_closed (0 open .. 1 closed), the
+    # current limit rises to strong_gripper_torque_nm (max 3 Nm).
+    strong_gripper_torque_nm: float = 0.0
+    strong_gripper_min_closed: float = 2.0
+    # Commanded 1.0 maps to this normalized motor target (max 1.15); 1.0 = none.
+    strong_gripper_close_target: float = 1.0
     DM4310_TORQUE_CONSTANT: float = 0.945  # Nm/A
     EMIT_VELOCITY_SCALE: float = 100.0     # rad/s multiplier for EMIT mode
     EMIT_CURRENT_SCALE: float = 1000.0     # A multiplier for EMIT mode

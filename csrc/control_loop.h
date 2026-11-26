@@ -64,6 +64,16 @@ struct RtLoopConfig {
     double gripper_open_pos = 0.0;
     double gripper_closed_pos = -4.7;
     double max_gripper_torque_nm = 1.0;
+    // Strong grip near closed (strong_grip.h). 0 = off (default, old behaviour).
+    // While the measured gripper is closed past strong_gripper_min_closed
+    // (normalized 0 open .. 1 closed) the EMIT current limit rises to
+    // strong_gripper_torque_nm (<= 3 Nm), ramped over strong_gripper_ramp_s.
+    double strong_gripper_torque_nm = 0.0;
+    double strong_gripper_min_closed = 2.0;  // > 1 = never engages
+    double strong_gripper_ramp_s = 0.05;
+    // Commanded 1.0 maps to this normalized motor target (past finger contact), with
+    // [strong_gripper_min_closed, 1] remapped linearly. 1.0 = no overshoot; max 1.15.
+    double strong_gripper_close_target = 1.0;
     double torque_constant = 0.945;
     double emit_velocity_scale = 100.0;
     double emit_current_scale = 1000.0;
@@ -308,6 +318,10 @@ private:
 
     // Gripper calibration result
     double gripper_open_pos_ = 0.0;
+    // Upper bound of the REPORTED normalized gripper position. 1.0 as always;
+    // with strong grip on (strong_grip.h) the gripper closes past 1.0 and the
+    // real reading is reported unclamped above (lower bound stays 0).
+    double gripper_obs_max_ = 1.0;
 
     // Slew rate limiter state (RT thread only)
     std::array<double, 6> slew_target_ = {};
