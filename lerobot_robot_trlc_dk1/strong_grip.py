@@ -17,6 +17,10 @@ With the toggle on:
   toggle; cap 3) as its gripper limit, and reports the measured position without
   its upper clamp at 1.0 (csrc/strong_grip.h, control_loop.cpp).
 
+The dev toggle ``stiff-arm-asymmetric`` (stiff_arm.py) turns strong grip on too,
+with its own close target and a gripper limit per arm: ``settings()`` answers
+for it, and its values win when both toggles are on.
+
 Both values come from the environment (the ledream Makefile exports them, so a
 rig can override them in /etc/dreammachines/workstation.mk). Invalid values
 leave the feature off with a warning; this never raises, so a bad setting can't
@@ -49,8 +53,22 @@ def _float_env(env: dict[str, str], name: str, default: float) -> float:
     return float(raw) if raw else default
 
 
-def settings(environ: dict[str, str] | None = None) -> tuple[float, float] | None:
-    """(torque limit Nm, close-target scale) for this run, or None (feature off)."""
+def settings(environ: dict[str, str] | None = None, side: str | None = None) -> tuple[float, float] | None:
+    """(torque limit Nm, close-target scale) for this run, or None (feature off).
+
+    ``side`` ("left" / "right", or None when unknown) picks the arm's limit under
+    stiff-arm-asymmetric; strong grip alone has one limit for both arms.
+    """
+    from lerobot_robot_trlc_dk1 import stiff_arm  # here, not at the top: stiff_arm imports this module
+
+    profile = stiff_arm.settings(environ)
+    if profile is not None:
+        torque = profile.gripper_torque(side)
+        if toggle_on(environ):
+            logger.warning("dev toggles %s and %s are both on: %s's values win (gripper limit %.2f Nm, "
+                           "VR action x %.3f)", TOGGLE, stiff_arm.TOGGLE, stiff_arm.TOGGLE,
+                           torque, profile.close_target)
+        return torque, profile.close_target
     if not toggle_on(environ):
         return None
     env = os.environ if environ is None else environ

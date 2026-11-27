@@ -50,6 +50,10 @@ public:
         t_mos_ = t_mos_base;
         t_rotor_ = t_rotor_base;
     }
+    // Joints 1-3 (DM4340) report this torque in every later reply, encoded on the
+    // DM4340's -28..+28 Nm scale (28 = the highest reading the motor can give).
+    // Default 0: like before.
+    void set_arm_torque(float nm) { arm_tau_ = nm; }
 
 private:
     void state_packet(uint8_t* p16, uint8_t slave, float q, float tau, float tau_max) const {
@@ -78,7 +82,12 @@ private:
     void reply(uint8_t slave) {
         uint8_t pkt[16];
         // The gripper (slave 7) reports a torque spike so calibration ends at once.
-        state_packet(pkt, slave, 0.1f, slave == 7 ? 2.0f : 0.0f, 10.0f);
+        const float arm_tau = arm_tau_.load();
+        if (arm_tau != 0.0f && slave >= 1 && slave <= 3) {
+            state_packet(pkt, slave, 0.1f, arm_tau, 28.0f);
+        } else {
+            state_packet(pkt, slave, 0.1f, slave == 7 ? 2.0f : 0.0f, 10.0f);
+        }
         (void)!::write(fd_, pkt, sizeof(pkt));
     }
 
@@ -123,6 +132,7 @@ private:
     std::atomic<uint8_t> err_{0};
     std::atomic<uint8_t> t_mos_{0};
     std::atomic<uint8_t> t_rotor_{0};
+    std::atomic<float> arm_tau_{0.0f};
     std::thread th_;
 };
 
