@@ -15,7 +15,7 @@ namespace trlc {
 // position exactly as before.
 
 constexpr double kStrongGripMaxNm = 3.0;            // hard cap, checked at start()
-constexpr double kStrongGripMaxCloseTarget = 1.15;  // command clamp while on
+constexpr double kStrongGripMaxCloseTarget = 1.10;  // command clamp while on
 
 inline double strong_grip_cmd_max(bool on) { return on ? kStrongGripMaxCloseTarget : 1.0; }
 

@@ -12,7 +12,7 @@ With the toggle on:
   0, 0.5 becomes 0.55, 1.0 becomes 1.10). The stretch happens where the action
   is made, so the recorded action equals what the follower is sent, and a policy
   trained on such data outputs 0..1.10 itself. The DK1 leader is not stretched.
-- Each follower's RT loop accepts gripper commands up to 1.15 instead of 1.0,
+- Each follower's RT loop accepts gripper commands up to 1.10 instead of 1.0,
   uses ``STRONG_GRIP_TORQUE_NM`` (default 1.0 Nm, the same as without the
   toggle; cap 3) as its gripper limit, and reports the measured position without
   its upper clamp at 1.0 (csrc/strong_grip.h, control_loop.cpp).
@@ -36,7 +36,7 @@ CLOSE_TARGET_ENV = "STRONG_GRIP_CLOSE_TARGET"
 DEFAULT_TORQUE_NM = 1.0  # same as today's limit: by default only the stretch changes
 DEFAULT_CLOSE_TARGET = 1.10
 MAX_TORQUE_NM = 3.0  # same hard caps as csrc/strong_grip.h
-MAX_CLOSE_TARGET = 1.15
+MAX_CLOSE_TARGET = 1.10
 
 
 def toggle_on(environ: dict[str, str] | None = None) -> bool:

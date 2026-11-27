@@ -7,14 +7,14 @@ using namespace trlc;
 
 static void test_cmd_clamp() {
     assert(strong_grip_cmd_max(false) == 1.0);  // off: today's clamp
-    assert(strong_grip_cmd_max(true) == 1.15);  // on: stretched teleop commands pass
-    std::printf("  command clamp 1.0 off / 1.15 on: PASS\n");
+    assert(strong_grip_cmd_max(true) == 1.10);  // on: stretched teleop commands pass
+    std::printf("  command clamp 1.0 off / 1.10 on: PASS\n");
 }
 
 static void test_caps() {
     assert(kStrongGripMaxNm == 3.0);
-    assert(kStrongGripMaxCloseTarget == 1.15);
-    std::printf("  hard caps 3 Nm / 1.15: PASS\n");
+    assert(kStrongGripMaxCloseTarget == 1.10);
+    std::printf("  hard caps 3 Nm / 1.10: PASS\n");
 }
 
 int main() {
