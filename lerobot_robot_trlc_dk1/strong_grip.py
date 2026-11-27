@@ -1,22 +1,21 @@
-"""Strong grip for the right follower gripper.
+"""Strong grip for the follower grippers (both arms).
 
-Behind the session dev toggle ``strong-grip-right`` (dreamhub/dev-toggles.json):
-the hub puts the starting member's session toggles in ``DM_DEV_TOGGLES`` when
-it spawns a run. The leader's full close sends 1.0, where the fingertips only
-just touch, so there is almost no squeeze.
+Behind the session dev toggle ``strong-grip`` (dreamhub/dev-toggles.json): the
+hub puts the starting member's session toggles in ``DM_DEV_TOGGLES`` when it
+spawns a run. A full close sends 1.0, where the fingertips only just touch, so
+there is almost no squeeze.
 
 With the toggle on:
 
-- VR teleop (scripts/vr_teleop/teleop/bi_quest_teleop.py) stretches the right
-  gripper action uniformly by ``STRONG_GRIP_RIGHT_CLOSE_TARGET`` (default 1.10:
-  0 stays 0, 0.5 becomes 0.55, 1.0 becomes 1.10). The stretch happens where the
-  action is made, so the recorded action equals what the follower is sent, and
-  a policy trained on such data outputs 0..1.10 itself. The DK1 leader is not
-  stretched.
-- The right follower's RT loop accepts gripper commands up to 1.15 instead of
-  1.0, uses ``STRONG_GRIP_RIGHT_TORQUE_NM`` (default 1.0 Nm, the same as without
-  the toggle; cap 3) as its gripper limit, and reports the measured position
-  without its upper clamp at 1.0 (csrc/strong_grip.h, control_loop.cpp).
+- VR teleop (scripts/vr_teleop/teleop/bi_quest_teleop.py) stretches each
+  gripper action uniformly by ``STRONG_GRIP_CLOSE_TARGET`` (default 1.10: 0 stays
+  0, 0.5 becomes 0.55, 1.0 becomes 1.10). The stretch happens where the action
+  is made, so the recorded action equals what the follower is sent, and a policy
+  trained on such data outputs 0..1.10 itself. The DK1 leader is not stretched.
+- Each follower's RT loop accepts gripper commands up to 1.15 instead of 1.0,
+  uses ``STRONG_GRIP_TORQUE_NM`` (default 1.0 Nm, the same as without the
+  toggle; cap 3) as its gripper limit, and reports the measured position without
+  its upper clamp at 1.0 (csrc/strong_grip.h, control_loop.cpp).
 
 Both values come from the environment (the ledream Makefile exports them, so a
 rig can override them in /etc/dreammachines/workstation.mk). Invalid values
@@ -31,9 +30,9 @@ import os
 
 logger = logging.getLogger(__name__)
 
-TOGGLE = "strong-grip-right"
-TORQUE_ENV = "STRONG_GRIP_RIGHT_TORQUE_NM"
-CLOSE_TARGET_ENV = "STRONG_GRIP_RIGHT_CLOSE_TARGET"
+TOGGLE = "strong-grip"
+TORQUE_ENV = "STRONG_GRIP_TORQUE_NM"
+CLOSE_TARGET_ENV = "STRONG_GRIP_CLOSE_TARGET"
 DEFAULT_TORQUE_NM = 1.0  # same as today's limit: by default only the stretch changes
 DEFAULT_CLOSE_TARGET = 1.10
 MAX_TORQUE_NM = 3.0  # same hard caps as csrc/strong_grip.h
@@ -45,26 +44,13 @@ def toggle_on(environ: dict[str, str] | None = None) -> bool:
     return TOGGLE in {n.strip() for n in env.get("DM_DEV_TOGGLES", "").split(",") if n.strip()}
 
 
-def is_right_arm(label: str, port: str, environ: dict[str, str] | None = None) -> bool:
-    """The bimanual follower labels its arms; a single-arm run is recognised by
-    its port matching RIGHT_FOLLOWER_PORT (exported by the Makefile)."""
-    if label == "right":
-        return True
-    if label == "left":
-        return False
-    env = os.environ if environ is None else environ
-    right = env.get("RIGHT_FOLLOWER_PORT", "").strip()
-    return bool(right and port) and os.path.realpath(port) == os.path.realpath(right)
-
-
 def _float_env(env: dict[str, str], name: str, default: float) -> float:
     raw = env.get(name, "").strip()
     return float(raw) if raw else default
 
 
-def right_arm_settings(environ: dict[str, str] | None = None) -> tuple[float, float] | None:
-    """(torque limit Nm, close-target scale) for this run's right arm, or None
-    (feature off)."""
+def settings(environ: dict[str, str] | None = None) -> tuple[float, float] | None:
+    """(torque limit Nm, close-target scale) for this run, or None (feature off)."""
     if not toggle_on(environ):
         return None
     env = os.environ if environ is None else environ
@@ -78,6 +64,6 @@ def right_arm_settings(environ: dict[str, str] | None = None) -> tuple[float, fl
     except ValueError as e:
         logger.warning("dev toggle %s is on, but %s. Strong grip stays OFF", TOGGLE, e)
         return None
-    logger.warning("dev toggle %s: right gripper VR action x %.3f, follower limit %.2f Nm",
+    logger.warning("dev toggle %s: gripper VR action x %.3f, follower limit %.2f Nm",
                    TOGGLE, close_target, torque)
     return torque, close_target

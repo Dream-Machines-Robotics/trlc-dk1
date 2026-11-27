@@ -2,9 +2,9 @@
 
 namespace trlc {
 
-// Strong grip (control_loop.cpp), dev toggle strong-grip-right on the Python
+// Strong grip (control_loop.cpp), dev toggle strong-grip on the Python
 // side. The leader's full close sends 1.0, where the fingertips only just
-// touch. With strong grip on, the teleop (VR) sends right-gripper actions
+// touch. With strong grip on, the teleop (VR) sends gripper actions
 // stretched up to about 1.10, and this loop:
 //   - accepts gripper commands up to kStrongGripMaxCloseTarget instead of 1.0
 //     (command_gripper), so the recorded action is exactly what is sent;
