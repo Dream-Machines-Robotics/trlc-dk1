@@ -159,4 +159,18 @@ if(BUILD_TESTS)
     target_link_libraries(test_telemetry PRIVATE Threads::Threads)
     target_compile_options(test_telemetry PRIVATE -UNDEBUG)
     add_test(NAME test_telemetry COMMAND test_telemetry)
+
+    # Over-torque trip on joints 1-3 with the stiff-arm-asymmetric limit, same fake bus.
+    add_executable(test_torque_trip tests/test_torque_trip.cpp
+        serial_port.cpp rt_utils.cpp gravity_comp.cpp control_loop.cpp)
+    target_include_directories(test_torque_trip PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    if(MUJOCO_INCLUDE_DIR)
+        target_include_directories(test_torque_trip PRIVATE ${MUJOCO_INCLUDE_DIR})
+    endif()
+    if(MUJOCO_LIBRARY)
+        target_link_libraries(test_torque_trip PRIVATE ${MUJOCO_LIBRARY})
+    endif()
+    target_link_libraries(test_torque_trip PRIVATE Threads::Threads)
+    target_compile_options(test_torque_trip PRIVATE -UNDEBUG)
+    add_test(NAME test_torque_trip COMMAND test_torque_trip)
 endif()

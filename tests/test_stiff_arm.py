@@ -22,22 +22,26 @@ def test_toggle_off_means_off():
     assert sa.settings({"DM_DEV_TOGGLES": "rtc-live"}) is None
 
 
+
 def test_toggle_on_uses_defaults():
     p = sa.settings(ON)
     for side in sa.SIDES:
-        kp, kd = p.gains(side)
-        assert kp == (100.0, 250.0, 250.0, 20.0, 20.0, 10.0)
-        assert kd == (5.0, 5.0, 5.0, 1.0, 1.0, 1.0)
+        arm = p.arm(side)
+        assert arm.kp == (100.0, 200.0, 200.0, 20.0, 20.0, 10.0)
+        assert arm.kd == (5.0, 5.0, 5.0, 1.0, 1.0, 1.0)
+        assert arm.torque_limit == (27.0, 27.0, 27.0, 10.0, 10.0, 10.0)
     assert p.gripper_torque("right") == 1.5
     assert p.gripper_torque("left") == 0.5
     assert p.close_target == 1.10
 
 
-def test_defaults_change_only_joints_2_and_3():
+def test_defaults_change_only_joints_1_to_3():
     base = DK1RobotConfig()
-    kp, kd = sa.settings(ON).gains("left")
-    changed = [i for i in range(6) if kp[i] != base.arm_kp[i] or kd[i] != base.arm_kd[i]]
-    assert changed == [1, 2]
+    arm = sa.settings(ON).arm("left")
+    gains = [i for i in range(6) if arm.kp[i] != base.arm_kp[i] or arm.kd[i] != base.arm_kd[i]]
+    assert gains == [1, 2]
+    limits = [i for i in range(6) if arm.torque_limit[i] != base.joint_torque_limits[i]]
+    assert limits == [0, 1, 2]
 
 
 def test_overrides_per_arm():
@@ -45,29 +49,38 @@ def test_overrides_per_arm():
         **ON,
         sa.KP_ENV["left"]: "100,300,200,20,20,10",
         sa.KD_ENV["right"]: "5 4.5 4 1 1 1",  # spaces work too
+        sa.TORQUE_LIMIT_ENV["right"]: "25,24,26,9,9,9",
         sa.GRIPPER_TORQUE_ENV["left"]: "0.7",
         sa.GRIPPER_TORQUE_ENV["right"]: "3",  # the cap itself is allowed
         sa.CLOSE_TARGET_ENV: "1.05",
     }
     p = sa.settings(env)
-    assert p.gains("left") == ((100.0, 300.0, 200.0, 20.0, 20.0, 10.0), sa.DEFAULT_KD)
-    assert p.gains("right") == (sa.DEFAULT_KP, (5.0, 4.5, 4.0, 1.0, 1.0, 1.0))
+    assert p.arm("left") == sa.ArmSettings((100.0, 300.0, 200.0, 20.0, 20.0, 10.0), sa.DEFAULT_KD,
+                                           sa.DEFAULT_TORQUE_LIMIT)
+    assert p.arm("right") == sa.ArmSettings(sa.DEFAULT_KP, (5.0, 4.5, 4.0, 1.0, 1.0, 1.0),
+                                            (25.0, 24.0, 26.0, 9.0, 9.0, 9.0))
     assert (p.gripper_torque("left"), p.gripper_torque("right")) == (0.7, 3.0)
     assert p.close_target == 1.05
     # The caps themselves are allowed.
     assert sa.settings({**ON, sa.KP_ENV["right"]: "500,500,500,500,500,500"}) is not None
     assert sa.settings({**ON, sa.KD_ENV["right"]: "5,5,5,5,5,5"}) is not None
+    assert sa.settings({**ON, sa.TORQUE_LIMIT_ENV["left"]: "28,28,28,10,10,10"}) is not None
+    assert sa.settings({**ON, sa.TORQUE_LIMIT_ENV["left"]: "20,20,20,3,3,3"}) is not None
     assert sa.settings({**ON, sa.GRIPPER_TORQUE_ENV["left"]: "0.3"}) is not None
 
 
 @pytest.mark.parametrize("name,value", [
-    (sa.KP_ENV["left"], "100,501,250,20,20,10"),  # kp above 500
-    (sa.KP_ENV["right"], "100,-1,250,20,20,10"),  # negative
-    (sa.KP_ENV["left"], "100,250,250,20,20"),  # 5 joints
-    (sa.KP_ENV["left"], "100,250,250,20,20,10,1"),  # 7 joints
-    (sa.KP_ENV["left"], "100,nan,250,20,20,10"),
+    (sa.KP_ENV["left"], "100,501,200,20,20,10"),  # kp above 500
+    (sa.KP_ENV["right"], "100,-1,200,20,20,10"),  # negative
+    (sa.KP_ENV["left"], "100,200,200,20,20"),  # 5 joints
+    (sa.KP_ENV["left"], "100,200,200,20,20,10,1"),  # 7 joints
+    (sa.KP_ENV["left"], "100,nan,200,20,20,10"),
     (sa.KD_ENV["left"], "5,8,6.3,1,1,1"),  # kd above the MIT frame's 5
     (sa.KD_ENV["right"], "5,5,x,1,1,1"),
+    (sa.TORQUE_LIMIT_ENV["left"], "27,28.5,27,10,10,10"),  # above the DM4340's 28
+    (sa.TORQUE_LIMIT_ENV["right"], "27,27,27,10,10,10.5"),  # above the DM4310's 10
+    (sa.TORQUE_LIMIT_ENV["left"], "27,15,27,10,10,10"),  # below 20 on joints 1-3
+    (sa.TORQUE_LIMIT_ENV["right"], "27,27,27,2,10,10"),  # below 3 on joints 4-6
     (sa.GRIPPER_TORQUE_ENV["left"], "0.2"),  # below the 0.3 minimum
     (sa.GRIPPER_TORQUE_ENV["right"], "3.1"),  # above the 3 Nm cap
     (sa.GRIPPER_TORQUE_ENV["right"], "abc"),
@@ -82,12 +95,22 @@ def test_invalid_values_leave_the_whole_profile_off(name, value, caplog):
     assert sg.settings({**ON, name: value}) is None
 
 
-def test_caps_match_the_mit_frame_and_strong_grip():
+def test_caps_match_the_mit_frame_the_motors_and_strong_grip():
     from trlc_dk1_control.config import KD_MAX, KP_MAX
 
     assert (KP_MAX, KD_MAX) == (500.0, 5.0)  # csrc/dm_protocol.h build_mit_frame ranges
+    assert sa.MAX_TORQUE_LIMIT == (28.0, 28.0, 28.0, 10.0, 10.0, 10.0)  # motor_defs.h tau_max
     assert sa.MAX_GRIPPER_TORQUE_NM == sg.MAX_TORQUE_NM == 3.0
     assert sa.MAX_CLOSE_TARGET == sg.MAX_CLOSE_TARGET == 1.10
+
+
+def test_default_trip_is_below_what_the_motor_can_report():
+    """The DM4340 reports torque on a 12-bit scale over -28..+28 Nm, so the highest
+    reading is exactly 28.0: a limit of 28 can never be exceeded, 27 can."""
+    full_scale = 4095 / 4095 * 56.0 - 28.0
+    assert full_scale == 28.0
+    assert all(full_scale > lim for lim in sa.DEFAULT_TORQUE_LIMIT[:3])
+    assert not full_scale > DK1RobotConfig().joint_torque_limits[1]
 
 
 # --- arm side ----------------------------------------------------------------
@@ -109,12 +132,12 @@ def test_arm_side_from_label_then_port(tmp_path):
     assert sa.arm_side("", str(left), {"LEFT_FOLLOWER_PORT": str(left), "RIGHT_FOLLOWER_PORT": str(left)}) is None
 
 
-def test_unknown_side_shares_equal_gains_and_keeps_the_usual_gripper_limit():
+def test_unknown_side_shares_equal_settings_and_keeps_the_usual_gripper_limit():
     p = sa.settings(ON)
-    assert p.gains(None) == (sa.DEFAULT_KP, sa.DEFAULT_KD)
+    assert p.arm(None) == sa.ArmSettings(sa.DEFAULT_KP, sa.DEFAULT_KD, sa.DEFAULT_TORQUE_LIMIT)
     assert p.gripper_torque(None) == 1.0
-    differ = sa.settings({**ON, sa.KP_ENV["left"]: "100,200,200,20,20,10"})
-    assert differ.gains(None) is None
+    assert sa.settings({**ON, sa.KP_ENV["left"]: "100,150,150,20,20,10"}).arm(None) is None
+    assert sa.settings({**ON, sa.TORQUE_LIMIT_ENV["left"]: "25,25,25,10,10,10"}).arm(None) is None
 
 
 # --- strong grip under the profile ---------------------------------------------
@@ -185,11 +208,13 @@ def connect(monkeypatch):
 def test_follower_toggle_off_is_byte_identical(connect):
     base = DK1RobotConfig()
     for env in ({}, {"DM_DEV_TOGGLES": "rtc-live"},
-                {sa.KP_ENV["right"]: "500,500,500,500,500,500"}):  # settings alone do nothing
+                {sa.KP_ENV["right"]: "500,500,500,500,500,500",  # settings alone do nothing
+                 sa.TORQUE_LIMIT_ENV["right"]: "20,20,20,3,3,3"}):
         cfg = connect(label="right", **env)
-        assert cfg.arm_kp.tobytes() == base.arm_kp.tobytes()
-        assert cfg.arm_kd.tobytes() == base.arm_kd.tobytes()
-        assert cfg.arm_kp.dtype == base.arm_kp.dtype and cfg.arm_kd.dtype == base.arm_kd.dtype
+        for name in ("arm_kp", "arm_kd", "joint_torque_limits"):
+            got, want = getattr(cfg, name), getattr(base, name)
+            assert got.tobytes() == want.tobytes() and got.dtype == want.dtype, name
+        np.testing.assert_array_equal(cfg.joint_torque_limits, [28, 28, 28, 10, 10, 10])
         assert cfg.max_gripper_torque_nm == 1.0
         assert cfg.strong_gripper_torque_nm == 0.0
 
@@ -198,17 +223,20 @@ def test_follower_toggle_on_gets_this_arms_values(connect, caplog):
     with caplog.at_level(logging.WARNING):
         right = connect(label="right", DM_DEV_TOGGLES=sa.TOGGLE)
         left = connect(label="left", DM_DEV_TOGGLES=sa.TOGGLE,
-                       **{sa.KP_ENV["left"]: "100,200,200,20,20,10"})
-    np.testing.assert_array_equal(right.arm_kp, [100, 250, 250, 20, 20, 10])
+                       **{sa.KP_ENV["left"]: "100,150,150,20,20,10",
+                          sa.TORQUE_LIMIT_ENV["left"]: "25,25,25,10,10,10"})
+    np.testing.assert_array_equal(right.arm_kp, [100, 200, 200, 20, 20, 10])
     np.testing.assert_array_equal(right.arm_kd, [5, 5, 5, 1, 1, 1])
+    np.testing.assert_array_equal(right.joint_torque_limits, [27, 27, 27, 10, 10, 10])
     assert right.strong_gripper_torque_nm == 1.5
-    np.testing.assert_array_equal(left.arm_kp, [100, 200, 200, 20, 20, 10])
+    np.testing.assert_array_equal(left.arm_kp, [100, 150, 150, 20, 20, 10])
+    np.testing.assert_array_equal(left.joint_torque_limits, [25, 25, 25, 10, 10, 10])
     assert left.strong_gripper_torque_nm == 0.5
     # max_gripper_torque_nm (the base limit) is untouched: strong grip carries the limit.
     assert right.max_gripper_torque_nm == left.max_gripper_torque_nm == 1.0
-    assert "Stiff arm ON (right arm): kp=[100, 250, 250, 20, 20, 10] kd=[5, 5, 5, 1, 1, 1], " \
-           "gripper limit 1.50 Nm" in caplog.text
-    assert "Stiff arm ON (left arm): kp=[100, 200, 200, 20, 20, 10]" in caplog.text
+    assert "Stiff arm ON (right arm): kp=[100, 200, 200, 20, 20, 10] kd=[5, 5, 5, 1, 1, 1], " \
+           "torque trip [27, 27, 27, 10, 10, 10] Nm, gripper limit 1.50 Nm" in caplog.text
+    assert "Stiff arm ON (left arm): kp=[100, 150, 150, 20, 20, 10]" in caplog.text
 
 
 def test_follower_single_arm_by_port(connect, tmp_path):
@@ -232,4 +260,5 @@ def test_follower_invalid_profile_runs_as_today(connect):
     cfg = connect(label="left", DM_DEV_TOGGLES=sa.TOGGLE, **{sa.KD_ENV["left"]: "5,8,6.3,1,1,1"})
     assert cfg.arm_kp.tobytes() == base.arm_kp.tobytes()
     assert cfg.arm_kd.tobytes() == base.arm_kd.tobytes()
+    assert cfg.joint_torque_limits.tobytes() == base.joint_torque_limits.tobytes()
     assert cfg.strong_gripper_torque_nm == 0.0

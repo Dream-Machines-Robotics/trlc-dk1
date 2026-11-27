@@ -197,8 +197,8 @@ class DK1Follower(Robot):
         from trlc_dk1_control.config import DK1RobotConfig
         from trlc_dk1_control.rt_robot import DK1RobotRT
 
-        # Dev toggle stiff-arm-asymmetric (stiff_arm.py): gains and gripper limit per
-        # arm, plus strong grip. None = off: no gains are passed, so the defaults stay.
+        # Dev toggle stiff-arm-asymmetric (stiff_arm.py): gains, torque trip and gripper
+        # limit per arm, plus strong grip. None = off: nothing is passed, the defaults stay.
         side = stiff_arm.arm_side(self.config.label, self.config.port)
         stiff = stiff_arm.settings()
         strong_torque = self.config.strong_gripper_torque
@@ -210,11 +210,12 @@ class DK1Follower(Robot):
                 strong_torque = strong[0]
         gains = {}
         if stiff is not None:
-            arm_gains = stiff.gains(side)
-            if arm_gains is not None:
-                gains = {"arm_kp": np.array(arm_gains[0], dtype=np.float64),
-                         "arm_kd": np.array(arm_gains[1], dtype=np.float64)}
-            stiff_arm.log_on(str(self), side, arm_gains, strong_torque)
+            arm = stiff.arm(side)
+            if arm is not None:
+                gains = {"arm_kp": np.array(arm.kp, dtype=np.float64),
+                         "arm_kd": np.array(arm.kd, dtype=np.float64),
+                         "joint_torque_limits": np.array(arm.torque_limit, dtype=np.float64)}
+            stiff_arm.log_on(str(self), side, arm, strong_torque)
         # Dev toggle teleop-telemetry (telemetry.py): only in a hub quick teleop
         # session, which names the log folder. None = off, nothing changes.
         log_dir = telemetry.log_dir()
