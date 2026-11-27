@@ -23,6 +23,8 @@ from typing import Any
 from lerobot.cameras import CameraConfig
 from lerobot.cameras.utils import make_cameras_from_configs
 from lerobot.robots import Robot, RobotConfig
+
+from lerobot_robot_trlc_dk1.strong_grip import is_right_arm, right_arm_settings
 from lerobot.robots.utils import ensure_safe_goal_position
 from lerobot.utils.errors import DeviceAlreadyConnectedError, DeviceNotConnectedError
 
@@ -47,6 +49,9 @@ class DK1FollowerConfig(RobotConfig):
     # Smooth motion is untouched. rt_impedance mode only.
     joint_accel_limit: float = 0.0
     max_gripper_torque: float = 1.0 # Nm (/0.00875m spur gear radius = 114N gripper force)
+    # Strong grip (strong_grip.py): torque > 0 = on (gripper limit while on, max 3
+    # Nm; commands accepted up to 1.15). rt_impedance mode only.
+    strong_gripper_torque: float = 0.0
     cameras: dict[str, CameraConfig] = field(default_factory=dict)
     # Control mode: "pos_vel" (Python serial) or "rt_impedance" (C++ RT loop at 250Hz)
     control_mode: str = "rt_impedance"
@@ -191,11 +196,18 @@ class DK1Follower(Robot):
         from trlc_dk1_control.config import DK1RobotConfig
         from trlc_dk1_control.rt_robot import DK1RobotRT
 
+        strong_torque = self.config.strong_gripper_torque
+        if strong_torque <= 0.0 and is_right_arm(self.config.label, self.config.port):
+            # Dev toggle strong-grip-right (strong_grip.py); None = off, unchanged.
+            strong = right_arm_settings()
+            if strong is not None:
+                strong_torque = strong[0]
         rt_config = DK1RobotConfig(
             serial_port=self.config.port,
             label=self.config.label or (self.config.id or ""),
             disable_torque_on_disconnect=self.config.disable_torque_on_disconnect,
             max_gripper_torque_nm=self.config.max_gripper_torque,
+            strong_gripper_torque_nm=strong_torque,
             joint_velocity_scaling=self.config.joint_velocity_scaling,
             joint_accel_limits=np.full(6, max(self.config.joint_accel_limit, 0.0)),
         )

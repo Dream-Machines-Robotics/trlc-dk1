@@ -73,6 +73,7 @@ NB_MODULE(_trlc_dk1_rt, m) {
         .def_rw("gripper_open_pos", &RtLoopConfig::gripper_open_pos)
         .def_rw("gripper_closed_pos", &RtLoopConfig::gripper_closed_pos)
         .def_rw("max_gripper_torque_nm", &RtLoopConfig::max_gripper_torque_nm)
+        .def_rw("strong_gripper_torque_nm", &RtLoopConfig::strong_gripper_torque_nm)
         .def_rw("torque_constant", &RtLoopConfig::torque_constant)
         .def_rw("emit_velocity_scale", &RtLoopConfig::emit_velocity_scale)
         .def_rw("emit_current_scale", &RtLoopConfig::emit_current_scale)
