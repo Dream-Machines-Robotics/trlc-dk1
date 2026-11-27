@@ -160,7 +160,12 @@ class DK1RobotRT:
             rt_cfg.strong_gripper_torque_nm = config.strong_gripper_torque_nm
         if config.telemetry:
             # Set only when on, like strong grip: the default path never touches it.
-            rt_cfg.telemetry = True
+            # An extension built before telemetry has no such field: the arm still
+            # connects, without the log (start_follower says so).
+            if hasattr(rt_cfg, "telemetry"):
+                rt_cfg.telemetry = True
+            else:
+                logger.warning("DK1RobotRT: the RT extension predates telemetry (make rt-ext-ensure): no detailed log")
         rt_cfg.torque_constant = config.DM4310_TORQUE_CONSTANT
         rt_cfg.emit_velocity_scale = config.EMIT_VELOCITY_SCALE
         rt_cfg.emit_current_scale = config.EMIT_CURRENT_SCALE

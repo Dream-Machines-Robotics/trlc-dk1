@@ -79,7 +79,8 @@ def write_json(path: Path, data: dict[str, Any]) -> None:
 class ChunkWriter:
     """Rows of one stream as ``<dir>/<stream>.<pid>.<seq>.npy`` chunks of a fixed dtype.
 
-    The pid keeps two processes of one session apart (the teleop, then the park).
+    The pid keeps two processes of one session apart (the teleop, then the Makefile
+    recipe's park when teleop ends by itself).
     Not thread-safe: one writer thread per stream."""
 
     def __init__(self, directory: Path, stream: str, dtype: np.dtype, rows_per_chunk: int = ROWS_PER_CHUNK):
@@ -192,17 +193,24 @@ class FollowerTelemetry(threading.Thread):
             logger.error("detailed teleop log %s stopped: %s", self.stream, self.error)
             return False
 
-    def close(self, timeout: float = 2.0) -> None:
-        """Stop, take the last rows, write the open chunk and the stream summary."""
+    def close(self, timeout: float = 1.0) -> None:
+        """Stop, take the last rows, write the open chunk and the stream summary.
+
+        Runs before the RT loop stops, so it waits at most ``timeout`` for the thread:
+        a thread still stuck (a hung disk) keeps its writer, its last rows are lost,
+        and the arm is released on time."""
         self._halt.set()
         if self.is_alive():
             self.join(timeout)
-        if self.error is None:
-            self._step()
-        try:
-            self._writer.flush()
-        except Exception as e:  # noqa: BLE001
-            self.error = self.error or f"{type(e).__name__}: {e}"
+        if self.is_alive():
+            self.error = self.error or f"the drain thread did not stop within {timeout:.1f} s (disk?)"
+        else:
+            if self.error is None:
+                self._step()
+            try:
+                self._writer.flush()
+            except Exception as e:  # noqa: BLE001
+                self.error = self.error or f"{type(e).__name__}: {e}"
         try:
             write_json(
                 self.directory / f"{self.stream}.{os.getpid()}.summary.json",

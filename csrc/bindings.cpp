@@ -265,7 +265,13 @@ NB_MODULE(_trlc_dk1_rt, m) {
         // index to ask for next and how many slots were lost before `from_idx` got
         // read. The copy runs without the GIL.
         .def("read_telemetry", [](const RtControlLoop& loop, uint64_t from_idx, size_t max_count) {
-            max_count = std::min<size_t>(max_count, 65536);
+            // Room for what is there now (plus a little that may land meanwhile), not
+            // for max_count: a drain ten times a second usually finds about 25 slots.
+            const uint64_t w = loop.telemetry_write_index();
+            const uint64_t avail = w > from_idx ? w - from_idx : 0;
+            max_count = static_cast<size_t>(std::min<uint64_t>(
+                {static_cast<uint64_t>(std::min<size_t>(max_count, 65536)), avail + 64,
+                 static_cast<uint64_t>(loop.telemetry_capacity())}));
             auto* data = new TelemetrySlot[max_count > 0 ? max_count : 1];
             uint64_t next = from_idx, dropped = 0;
             size_t n = 0;

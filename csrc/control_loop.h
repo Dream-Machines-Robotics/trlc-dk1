@@ -235,6 +235,8 @@ public:
     // Without telemetry it returns 0 and leaves next = from, dropped = 0.
     bool telemetry_enabled() const { return telem_ != nullptr; }
     size_t telemetry_capacity() const { return telem_ ? telem_->capacity() : 0; }
+    // Slots published so far (0 without telemetry).
+    uint64_t telemetry_write_index() const { return telem_ ? telem_->write_index() : 0; }
     size_t read_telemetry(uint64_t from, TelemetrySlot* out, size_t max,
                           uint64_t& next, uint64_t& dropped) const;
 

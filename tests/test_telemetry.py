@@ -173,3 +173,82 @@ def test_native_layout_when_built():
     assert not loop.telemetry_enabled()
     raw, nxt, dropped = loop.read_telemetry(5, 16)
     assert raw.shape == (0, 288) and nxt == 5 and dropped == 0
+
+
+def test_close_never_shares_the_writer_with_a_stuck_thread(tmp_path):
+    import threading
+
+    gate = threading.Event()
+
+    class Slow(FakeRing):
+        def read_telemetry(self, from_idx, max_count):
+            gate.wait(5)  # a drain stuck in I/O
+            return super().read_telemetry(from_idx, max_count)
+
+    ring = Slow()
+    ring.add(10)
+    t = tm.FollowerTelemetry(ring, tmp_path, "follower", DTYPE, period_s=0.01)
+    t.start()
+    time.sleep(0.05)
+    t0 = time.monotonic()
+    t.close(timeout=0.2)
+    assert time.monotonic() - t0 < 1.0  # the arm is not held up
+    assert "did not stop" in t.error
+    gate.set()
+    t.join(2)
+
+
+def test_an_old_native_build_still_connects(monkeypatch):
+    """With the toggle on and an RT extension built before telemetry, the arm must
+    still connect (no detailed log), not fail at connect."""
+    from types import SimpleNamespace
+
+    from trlc_dk1_control import rt_robot
+    from trlc_dk1_control.config import DK1RobotConfig
+
+    class OldCfg:
+        __slots__ = [
+            "serial_port",
+            "label",
+            "tx_frame_timeout_us",
+            "max_consecutive_tx_fail_cycles",
+            "loop_hz",
+            "motors",
+            "default_kp",
+            "default_kd",
+            "joint_pos_limits",
+            "joint_torque_limits",
+            "joint_velocity_limits",
+            "max_pos_delta_per_cycle",
+            "max_accel_per_cycle2",
+            "limit_buffer",
+            "model_path",
+            "gravity_comp_scale",
+            "command_timeout_s",
+            "overcurrent_threshold",
+            "overspeed_threshold",
+            "min_motors_required",
+            "gripper_cal_timeout_s",
+            "max_consecutive_empty_cycles",
+            "gripper_open_pos",
+            "gripper_closed_pos",
+            "max_gripper_torque_nm",
+            "strong_gripper_torque_nm",
+            "torque_constant",
+            "emit_velocity_scale",
+            "emit_current_scale",
+            "disable_torque_on_disconnect",
+            "rt_cpu_affinity",
+            "rt_priority",
+        ]
+
+    native = pytest.importorskip("trlc_dk1_control._trlc_dk1_rt")
+    fake = SimpleNamespace(
+        RtControlLoop=object,
+        RtLoopConfig=OldCfg,
+        MotorDescriptor=lambda: SimpleNamespace(),
+        MotorType=native.MotorType,
+    )
+    monkeypatch.setitem(__import__("sys").modules, "trlc_dk1_control._trlc_dk1_rt", fake)
+    robot = rt_robot.DK1RobotRT(DK1RobotConfig(serial_port="/dev/null", telemetry=True))
+    assert not hasattr(robot._rt_cfg, "telemetry")
