@@ -182,6 +182,23 @@ inline MotorState decode_motor_state(const uint8_t* packet, const MotorLimits& l
     return s;
 }
 
+// The rest of a state reply, which decode_motor_state() leaves out. In the Damiao
+// feedback frame (DM-J4310/J4340 manuals) byte 0 carries the motor id in its low 4
+// bits and a state code in its high 4 bits (0 disabled, 1 enabled, 8 over-voltage,
+// 9 under-voltage, A over-current, B driver over-temperature, C coil
+// over-temperature, D comm loss, E overload); bytes 6 and 7 are the driver (MOS)
+// and rotor temperatures in degrees C. Only read for telemetry (telemetry.h).
+struct MotorStatusBytes {
+    uint8_t err;
+    uint8_t t_mos;
+    uint8_t t_rotor;
+};
+
+inline MotorStatusBytes decode_motor_status(const uint8_t* packet) {
+    const uint8_t* data = packet + 7;
+    return MotorStatusBytes{static_cast<uint8_t>(data[0] >> 4), data[6], data[7]};
+}
+
 // Extract the CAN ID from a 16-byte receive packet
 inline uint32_t decode_can_id(const uint8_t* packet) {
     return static_cast<uint32_t>(packet[3]) |

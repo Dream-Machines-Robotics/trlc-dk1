@@ -3,6 +3,7 @@
 #include <array>
 #include <atomic>
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <thread>
 #include <vector>
@@ -13,6 +14,7 @@
 #include "perf_counters.h"
 #include "safety.h"
 #include "serial_port.h"
+#include "telemetry.h"
 
 namespace trlc {
 
@@ -101,6 +103,12 @@ struct RtLoopConfig {
 
     // Shutdown
     bool disable_torque_on_disconnect = true;
+
+    // Per-cycle telemetry (telemetry.h): off = no ring, one null check per cycle.
+    // On, every control cycle is kept in a ring of telemetry_ring_size slots
+    // (1024 = about 4 s at 250 Hz) for read_telemetry() to drain.
+    bool telemetry = false;
+    int telemetry_ring_size = 1024;
 
     // RT
     int rt_priority = 80;
@@ -222,6 +230,16 @@ public:
         return disable_torque_on_disconnect_.load(std::memory_order_relaxed);
     }
 
+    // Telemetry (RtLoopConfig::telemetry). read_telemetry() copies up to `max`
+    // slots from index `from` on and returns how many; see TelemetryRing::read.
+    // Without telemetry it returns 0 and leaves next = from, dropped = 0.
+    bool telemetry_enabled() const { return telem_ != nullptr; }
+    size_t telemetry_capacity() const { return telem_ ? telem_->capacity() : 0; }
+    // Slots published so far (0 without telemetry).
+    uint64_t telemetry_write_index() const { return telem_ ? telem_->write_index() : 0; }
+    size_t read_telemetry(uint64_t from, TelemetrySlot* out, size_t max,
+                          uint64_t& next, uint64_t& dropped) const;
+
     // Diagnostics
     PerfSnapshot get_perf() const;
     size_t read_cycle_times(float* buf, size_t max) const;
@@ -309,6 +327,9 @@ private:
     bool thread_abandoned_ = false;
     std::thread thread_;
     bool rt_active_ = false;
+
+    // Per-cycle telemetry ring, only when cfg_.telemetry (else null).
+    std::unique_ptr<TelemetryRing> telem_;
 
     // Gripper calibration result
     double gripper_open_pos_ = 0.0;

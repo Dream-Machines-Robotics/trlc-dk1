@@ -158,6 +158,14 @@ class DK1RobotRT:
             # Set only when on, so the default path never touches the new fields
             # (an extension built before them raises here, loudly, only when used).
             rt_cfg.strong_gripper_torque_nm = config.strong_gripper_torque_nm
+        if config.telemetry:
+            # Set only when on, like strong grip: the default path never touches it.
+            # An extension built before telemetry has no such field: the arm still
+            # connects, without the log (start_follower says so).
+            if hasattr(rt_cfg, "telemetry"):
+                rt_cfg.telemetry = True
+            else:
+                logger.warning("DK1RobotRT: the RT extension predates telemetry (make rt-ext-ensure): no detailed log")
         rt_cfg.torque_constant = config.DM4310_TORQUE_CONSTANT
         rt_cfg.emit_velocity_scale = config.EMIT_VELOCITY_SCALE
         rt_cfg.emit_current_scale = config.EMIT_CURRENT_SCALE
@@ -503,6 +511,20 @@ class DK1RobotRT:
         if self._loop is None:
             return None
         return self._loop.get_perf()
+
+    def telemetry_enabled(self) -> bool:
+        """True when the RT loop keeps per-cycle telemetry (config.telemetry)."""
+        fn = getattr(self._loop, "telemetry_enabled", None) if self._loop is not None else None
+        return bool(fn()) if fn is not None else False
+
+    def read_telemetry(self, from_idx: int, max_count: int = 4096) -> tuple[np.ndarray, int, int]:
+        """Raw telemetry slots from ``from_idx`` on: ``(bytes (n, slot_size), next_idx,
+        dropped)``. View the bytes with ``lerobot_robot_trlc_dk1.telemetry.slot_dtype()``.
+        Copies from the RT ring only, no bus traffic."""
+        if self._loop is None:
+            return np.zeros((0, 0), dtype=np.uint8), int(from_idx), 0
+        data, nxt, dropped = self._loop.read_telemetry(int(from_idx), int(max_count))
+        return np.asarray(data), int(nxt), int(dropped)
 
     def read_cycle_times(self, n: int = 10000) -> np.ndarray:
         """Return array of recent cycle times in microseconds."""

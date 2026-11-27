@@ -1,3 +1,5 @@
+#include <algorithm>
+
 #include <nanobind/nanobind.h>
 #include <nanobind/stl/string.h>
 #include <nanobind/stl/vector.h>
@@ -79,6 +81,8 @@ NB_MODULE(_trlc_dk1_rt, m) {
         .def_rw("emit_current_scale", &RtLoopConfig::emit_current_scale)
         .def_rw("gripper_cal_timeout_s", &RtLoopConfig::gripper_cal_timeout_s)
         .def_rw("disable_torque_on_disconnect", &RtLoopConfig::disable_torque_on_disconnect)
+        .def_rw("telemetry", &RtLoopConfig::telemetry)
+        .def_rw("telemetry_ring_size", &RtLoopConfig::telemetry_ring_size)
         .def_rw("rt_priority", &RtLoopConfig::rt_priority)
         .def_rw("rt_cpu_affinity", &RtLoopConfig::rt_cpu_affinity)
         .def_rw("rt_use_mlockall", &RtLoopConfig::rt_use_mlockall)
@@ -254,8 +258,44 @@ NB_MODULE(_trlc_dk1_rt, m) {
         })
         .def("reset_perf", &RtControlLoop::reset_perf, nb::arg("timeout_ms") = 100,
              nb::call_guard<nb::gil_scoped_release>())
+        .def("telemetry_enabled", &RtControlLoop::telemetry_enabled)
+        .def("telemetry_capacity", &RtControlLoop::telemetry_capacity)
+        // Telemetry slots from index `from_idx` on, as raw bytes: a (n, slot_size)
+        // uint8 array to view with the dtype built from telemetry_fields(), plus the
+        // index to ask for next and how many slots were lost before `from_idx` got
+        // read. The copy runs without the GIL.
+        .def("read_telemetry", [](const RtControlLoop& loop, uint64_t from_idx, size_t max_count) {
+            // Room for what is there now (plus a little that may land meanwhile), not
+            // for max_count: a drain ten times a second usually finds about 25 slots.
+            const uint64_t w = loop.telemetry_write_index();
+            const uint64_t avail = w > from_idx ? w - from_idx : 0;
+            max_count = static_cast<size_t>(std::min<uint64_t>(
+                {static_cast<uint64_t>(std::min<size_t>(max_count, 65536)), avail + 64,
+                 static_cast<uint64_t>(loop.telemetry_capacity())}));
+            auto* data = new TelemetrySlot[max_count > 0 ? max_count : 1];
+            uint64_t next = from_idx, dropped = 0;
+            size_t n = 0;
+            {
+                nb::gil_scoped_release release;
+                n = loop.read_telemetry(from_idx, data, max_count, next, dropped);
+            }
+            nb::capsule owner(data, [](void* p) noexcept { delete[] static_cast<TelemetrySlot*>(p); });
+            auto arr = nb::ndarray<nb::numpy, uint8_t>(
+                reinterpret_cast<uint8_t*>(data), {n, sizeof(TelemetrySlot)}, owner);
+            return nb::make_tuple(arr, next, dropped);
+        }, nb::arg("from_idx"), nb::arg("max_count") = 4096)
         .def("is_running", &RtControlLoop::is_running)
         .def("is_rt_active", &RtControlLoop::is_rt_active);
+
+    // Telemetry slot layout: (name, offset, kind, itemsize, count) per field.
+    m.def("telemetry_fields", []() {
+        nb::list out;
+        for (const auto& f : telemetry_fields()) {
+            out.append(nb::make_tuple(std::string(f.name), f.offset, std::string(1, f.kind), f.itemsize, f.count));
+        }
+        return out;
+    });
+    m.def("telemetry_slot_size", []() { return sizeof(TelemetrySlot); });
 
     // Free functions
     m.def("detect_rt_kernel", &detect_rt_kernel,

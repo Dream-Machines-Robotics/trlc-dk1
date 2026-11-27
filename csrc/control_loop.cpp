@@ -118,6 +118,16 @@ void RtControlLoop::start() {
                                     std::to_string(cfg_.min_motors_required));
     }
 
+    if (cfg_.telemetry) {
+        if (cfg_.telemetry_ring_size < 64 || cfg_.telemetry_ring_size > 65536) {
+            throw std::invalid_argument("telemetry_ring_size must be in [64, 65536], got: " +
+                                        std::to_string(cfg_.telemetry_ring_size));
+        }
+        telem_ = std::make_unique<TelemetryRing>(static_cast<size_t>(cfg_.telemetry_ring_size));
+    } else {
+        telem_.reset();
+    }
+
     gripper_obs_max_ = cfg_.strong_gripper_torque_nm > 0.0
         ? std::numeric_limits<double>::infinity() : 1.0;
     gripper_cmd_max_ = strong_grip_cmd_max(cfg_.strong_gripper_torque_nm > 0.0);
@@ -238,6 +248,16 @@ void RtControlLoop::command_gripper(double normalized) {
     cmd_buf_.gripper_des = normalized;
     cmd_buf_.timestamp_ns = now_ns();
     cmd_seq_.store(s + 2, std::memory_order_release);
+}
+
+size_t RtControlLoop::read_telemetry(uint64_t from, TelemetrySlot* out, size_t max,
+                                     uint64_t& next, uint64_t& dropped) const {
+    if (!telem_) {
+        next = from;
+        dropped = 0;
+        return 0;
+    }
+    return telem_->read(from, out, max, next, dropped);
 }
 
 JointState RtControlLoop::get_joint_state() const {
@@ -676,6 +696,15 @@ void RtControlLoop::rt_thread_func() {
     std::array<double, 7> cur_pos = {};
     std::array<double, 7> cur_vel = {};
     std::array<double, 7> cur_torque = {};
+    // The rest of each motor's last state reply (telemetry only; decoding them is
+    // three byte copies per reply, no branch).
+    std::array<uint8_t, 7> cur_err = {};
+    std::array<uint8_t, 7> cur_t_mos = {};
+    std::array<uint8_t, 7> cur_t_rotor = {};
+    // Telemetry ring, or null (the default): the only per-cycle cost when off is
+    // the null check before the slot is filled.
+    TelemetryRing* const telem = telem_.get();
+    uint32_t missed_periods = 0;
 
     for (int i = 0; i < 7; ++i) {
         cur_pos[static_cast<size_t>(i)] = state_buf_.pos[static_cast<size_t>(i)];
@@ -757,6 +786,8 @@ void RtControlLoop::rt_thread_func() {
 
     while (running_.load(std::memory_order_acquire)) {
         uint64_t t0 = now_ns();
+        // How late this cycle woke against its schedule (telemetry).
+        const int64_t wake_late_ns = static_cast<int64_t>(t0) - static_cast<int64_t>(next_wakeup);
         ++loop_count;
         bool debug = false;
         cycle_tx_failed = false;
@@ -808,7 +839,13 @@ void RtControlLoop::rt_thread_func() {
                     cur_pos[i] = st.q;
                     cur_vel[i] = st.dq;
                     cur_torque[i] = st.tau;
-                    if (i < 7) motor_responded |= (1u << i);
+                    if (i < 7) {
+                        motor_responded |= (1u << i);
+                        const MotorStatusBytes sb = decode_motor_status(pkt.data());
+                        cur_err[i] = sb.err;
+                        cur_t_mos[i] = sb.t_mos;
+                        cur_t_rotor[i] = sb.t_rotor;
+                    }
                     matched = true;
                     if (debug) {
                         std::fprintf(stderr, "%s  motor[%zu] %s: pos=%.4f vel=%.4f tau=%.4f (can_id=0x%03X)\n", arm_prefix_.c_str(),
@@ -1046,6 +1083,7 @@ void RtControlLoop::rt_thread_func() {
         }
 
         // 10. Send commands — gated by comm error state
+        double gripper_q_sent = std::numeric_limits<double>::quiet_NaN();
         if (health_rt_.comm_loss) {
             if (cfg_.comm_loss_action == CommLossAction::DISABLE && !comm_error_disable_sent) {
                 // Send disable frames ONCE when first entering error state
@@ -1087,6 +1125,7 @@ void RtControlLoop::rt_thread_func() {
                 const auto& gm = cfg_.motors[6];
                 double gripper_q = gripper_open_pos_ +
                     cmd.gripper_des * (cfg_.gripper_closed_pos - gripper_open_pos_);
+                gripper_q_sent = gripper_q;
                 build_emit_frame(tx_frame, gm.slave_id,
                                 static_cast<float>(gripper_q),
                                 static_cast<float>(gripper_vel_emit),
@@ -1102,10 +1141,63 @@ void RtControlLoop::rt_thread_func() {
         double cycle_us = static_cast<double>(t1 - t0) / 1000.0;
         perf_.record(cycle_us, target_us);
 
+        // 11b. Telemetry: one slot per cycle, from values this cycle already has.
+        if (telem) {
+            TelemetrySlot& r = telem->next_slot();
+            r.t_ns = t0;
+            r.loop_count = loop_count;
+            r.cmd_ts_ns = cmd.timestamp_ns;
+            r.cycle_us = static_cast<float>(cycle_us);
+            r.wake_late_us = static_cast<float>(static_cast<double>(wake_late_ns) / 1000.0);
+            for (size_t i = 0; i < 7; ++i) {
+                r.pos[i] = static_cast<float>(cur_pos[i]);
+                r.vel[i] = static_cast<float>(cur_vel[i]);
+                r.torque[i] = static_cast<float>(cur_torque[i]);
+                r.t_mos[i] = cur_t_mos[i];
+                r.t_rotor[i] = cur_t_rotor[i];
+                r.err[i] = cur_err[i];
+            }
+            for (size_t j = 0; j < 6; ++j) {
+                r.q_cmd[j] = static_cast<float>(cmd.q_des[j]);
+                r.q_slew[j] = static_cast<float>(slew_target_[j]);
+                r.q_sent[j] = static_cast<float>(q_des[j]);
+                r.kp_sent[j] = static_cast<float>(kp[j]);
+                r.tau_ff[j] = static_cast<float>(tau_ff[j]);
+            }
+            r.gripper_cmd = static_cast<float>(cmd.gripper_des);
+            r.gripper_q_sent = static_cast<float>(gripper_q_sent);
+            const double g_range = cfg_.gripper_closed_pos - gripper_open_pos_;
+            r.gripper_pos_norm = std::abs(g_range) > 1e-6
+                ? static_cast<float>(std::clamp((cur_pos[6] - gripper_open_pos_) / g_range, 0.0, gripper_obs_max_))
+                : 0.0f;
+            r.missed_periods = missed_periods;
+            r.rx_bytes = static_cast<uint32_t>(total_rx);
+            r.overcurrent_count = static_cast<uint16_t>(std::clamp(health_rt_.overcurrent_count, 0, 65535));
+            r.overspeed_count = static_cast<uint16_t>(std::clamp(health_rt_.overspeed_count, 0, 65535));
+            r.empty_cycles = static_cast<uint16_t>(std::clamp(health_rt_.consecutive_empty_cycles, 0, 65535));
+            uint8_t stale = 0;
+            for (size_t i = 0; i < 7; ++i) {
+                if (health_rt_.motor_stale[i]) stale |= static_cast<uint8_t>(1u << i);
+            }
+            r.responded = motor_responded;
+            r.stale = stale;
+            uint8_t flags = 0;
+            if (health_rt_.damping_mode) flags |= TF_DAMPING;
+            if (health_rt_.comm_loss) flags |= TF_COMM_LOSS;
+            if (health_rt_.tx_stalled) flags |= TF_TX_STALLED;
+            if (cycle_tx_failed) flags |= TF_TX_FAILED;
+            if (!cmd_ok) flags |= TF_CMD_TORN;
+            if (cmd_age_s > cfg_.command_timeout_s) flags |= TF_CMD_STALE;
+            if (accel_guard_enabled_.load(std::memory_order_relaxed)) flags |= TF_ACCEL_GUARD;
+            r.flags = flags;
+            telem->publish();
+        }
+
         // 12. Sleep to next period
         next_wakeup += period_ns;
         if (next_wakeup < t1) {
             next_wakeup = t1 + period_ns;
+            ++missed_periods;
         }
         sleep_until_ns(next_wakeup);
     }

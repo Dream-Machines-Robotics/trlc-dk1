@@ -145,4 +145,18 @@ if(BUILD_TESTS)
     # Asserts are the test: never compile them out.
     target_compile_options(test_rt_never_blocks PRIVATE -UNDEBUG)
     add_test(NAME test_rt_never_blocks COMMAND test_rt_never_blocks)
+
+    # Per-cycle telemetry: decode, ring, and the loop against the same fake bus.
+    add_executable(test_telemetry tests/test_telemetry.cpp
+        serial_port.cpp rt_utils.cpp gravity_comp.cpp control_loop.cpp)
+    target_include_directories(test_telemetry PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    if(MUJOCO_INCLUDE_DIR)
+        target_include_directories(test_telemetry PRIVATE ${MUJOCO_INCLUDE_DIR})
+    endif()
+    if(MUJOCO_LIBRARY)
+        target_link_libraries(test_telemetry PRIVATE ${MUJOCO_LIBRARY})
+    endif()
+    target_link_libraries(test_telemetry PRIVATE Threads::Threads)
+    target_compile_options(test_telemetry PRIVATE -UNDEBUG)
+    add_test(NAME test_telemetry COMMAND test_telemetry)
 endif()
