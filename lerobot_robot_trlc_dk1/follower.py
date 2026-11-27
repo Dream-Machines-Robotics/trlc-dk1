@@ -24,7 +24,7 @@ from lerobot.cameras import CameraConfig
 from lerobot.cameras.utils import make_cameras_from_configs
 from lerobot.robots import Robot, RobotConfig
 
-from lerobot_robot_trlc_dk1.strong_grip import is_right_arm, right_arm_settings
+from lerobot_robot_trlc_dk1 import strong_grip
 from lerobot.robots.utils import ensure_safe_goal_position
 from lerobot.utils.errors import DeviceAlreadyConnectedError, DeviceNotConnectedError
 
@@ -197,9 +197,9 @@ class DK1Follower(Robot):
         from trlc_dk1_control.rt_robot import DK1RobotRT
 
         strong_torque = self.config.strong_gripper_torque
-        if strong_torque <= 0.0 and is_right_arm(self.config.label, self.config.port):
-            # Dev toggle strong-grip-right (strong_grip.py); None = off, unchanged.
-            strong = right_arm_settings()
+        if strong_torque <= 0.0:
+            # Dev toggle strong-grip (strong_grip.py), both arms; None = off, unchanged.
+            strong = strong_grip.settings()
             if strong is not None:
                 strong_torque = strong[0]
         rt_config = DK1RobotConfig(
