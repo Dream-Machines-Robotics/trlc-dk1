@@ -128,6 +128,9 @@ class DK1RobotConfig:
     # gripper current limit is that value (max 3 Nm), gripper commands are
     # accepted up to 1.10, and the reported position is not clamped at 1.0.
     strong_gripper_torque_nm: float = 0.0
+    # Per-cycle telemetry ring in the RT loop (csrc/telemetry.h), drained by
+    # lerobot_robot_trlc_dk1/telemetry.py for detailed teleop logs. Off by default.
+    telemetry: bool = False
     DM4310_TORQUE_CONSTANT: float = 0.945  # Nm/A
     EMIT_VELOCITY_SCALE: float = 100.0     # rad/s multiplier for EMIT mode
     EMIT_CURRENT_SCALE: float = 1000.0     # A multiplier for EMIT mode

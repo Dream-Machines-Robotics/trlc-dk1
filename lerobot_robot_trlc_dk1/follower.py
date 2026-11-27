@@ -24,7 +24,7 @@ from lerobot.cameras import CameraConfig
 from lerobot.cameras.utils import make_cameras_from_configs
 from lerobot.robots import Robot, RobotConfig
 
-from lerobot_robot_trlc_dk1 import strong_grip
+from lerobot_robot_trlc_dk1 import strong_grip, telemetry
 from lerobot.robots.utils import ensure_safe_goal_position
 from lerobot.utils.errors import DeviceAlreadyConnectedError, DeviceNotConnectedError
 
@@ -98,6 +98,7 @@ class DK1Follower(Robot):
         self.serial_device = None
         self.bus_connected = False
         self._rt_robot = None  # DK1RobotRT instance when using rt_impedance mode
+        self._telemetry = None  # telemetry.FollowerTelemetry while a detailed teleop log runs
         # Runtime copy of config.disable_torque_on_disconnect — see
         # set_disable_torque_on_disconnect(). Reset to the config value on connect().
         self._disable_torque_on_disconnect = config.disable_torque_on_disconnect
@@ -202,6 +203,9 @@ class DK1Follower(Robot):
             strong = strong_grip.settings()
             if strong is not None:
                 strong_torque = strong[0]
+        # Dev toggle teleop-telemetry (telemetry.py): only in a hub quick teleop
+        # session, which names the log folder. None = off, nothing changes.
+        log_dir = telemetry.log_dir()
         rt_config = DK1RobotConfig(
             serial_port=self.config.port,
             label=self.config.label or (self.config.id or ""),
@@ -210,10 +214,13 @@ class DK1Follower(Robot):
             strong_gripper_torque_nm=strong_torque,
             joint_velocity_scaling=self.config.joint_velocity_scaling,
             joint_accel_limits=np.full(6, max(self.config.joint_accel_limit, 0.0)),
+            telemetry=log_dir is not None,
         )
         self._rt_robot = DK1RobotRT(rt_config)
         self._rt_robot.connect()
         self.bus_connected = True
+        if log_dir is not None:
+            self._telemetry = telemetry.start_follower(self._rt_robot, log_dir, self.config.label, rt_config)
         logger.info(
             f"{self} connected via C++ RT control loop "
             f"(joint_velocity_scaling={self.config.joint_velocity_scaling}, "
@@ -515,6 +522,10 @@ class DK1Follower(Robot):
     def _disconnect_bus(self) -> None:
         """Stop the RT loop / close the serial bus (honouring the runtime
         release-on-disconnect choice). Idempotent."""
+        if self._telemetry is not None:
+            # The last rows first, while the RT loop still runs.
+            self._telemetry.close()
+            self._telemetry = None
         if self._rt_robot is not None:
             self._rt_robot.disconnect()
             self._rt_robot = None
