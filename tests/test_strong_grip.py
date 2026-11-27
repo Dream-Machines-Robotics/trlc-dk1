@@ -14,6 +14,7 @@ def test_toggle_on_uses_defaults():
 def test_overrides_from_env():
     env = {"DM_DEV_TOGGLES": sg.TOGGLE, sg.TORQUE_ENV: "3.0", sg.CLOSE_TARGET_ENV: "1.05"}
     assert sg.settings(env) == (3.0, 1.05)
+    assert sg.settings({**env, sg.CLOSE_TARGET_ENV: "1.10"})[1] == 1.10  # the cap itself is allowed
 
 
 def test_invalid_values_leave_it_off():
@@ -21,5 +22,5 @@ def test_invalid_values_leave_it_off():
     assert sg.settings({**on, sg.TORQUE_ENV: "3.5"}) is None  # above the hard cap
     assert sg.settings({**on, sg.TORQUE_ENV: "0"}) is None
     assert sg.settings({**on, sg.TORQUE_ENV: "abc"}) is None
-    assert sg.settings({**on, sg.CLOSE_TARGET_ENV: "1.2"}) is None  # above the cap
+    assert sg.settings({**on, sg.CLOSE_TARGET_ENV: "1.15"}) is None  # above the 1.10 cap
     assert sg.settings({**on, sg.CLOSE_TARGET_ENV: "0.9"}) is None

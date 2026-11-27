@@ -50,7 +50,7 @@ class DK1FollowerConfig(RobotConfig):
     joint_accel_limit: float = 0.0
     max_gripper_torque: float = 1.0 # Nm (/0.00875m spur gear radius = 114N gripper force)
     # Strong grip (strong_grip.py): torque > 0 = on (gripper limit while on, max 3
-    # Nm; commands accepted up to 1.15). rt_impedance mode only.
+    # Nm; commands accepted up to 1.10). rt_impedance mode only.
     strong_gripper_torque: float = 0.0
     cameras: dict[str, CameraConfig] = field(default_factory=dict)
     # Control mode: "pos_vel" (Python serial) or "rt_impedance" (C++ RT loop at 250Hz)

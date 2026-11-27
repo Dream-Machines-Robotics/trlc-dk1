@@ -66,7 +66,7 @@ struct RtLoopConfig {
     double max_gripper_torque_nm = 1.0;
     // Strong grip (strong_grip.h). strong_gripper_torque_nm > 0 = on: the
     // gripper current limit is that value (<= 3 Nm), gripper commands are
-    // accepted up to 1.15, and the reported position is not clamped at 1.0.
+    // accepted up to 1.10, and the reported position is not clamped at 1.0.
     double strong_gripper_torque_nm = 0.0;
     double torque_constant = 0.945;
     double emit_velocity_scale = 100.0;
@@ -316,7 +316,7 @@ private:
     // with strong grip on (strong_grip.h) the gripper closes past 1.0 and the
     // real reading is reported unclamped above (lower bound stays 0).
     double gripper_obs_max_ = 1.0;
-    // Upper clamp of gripper commands: 1.0, or 1.15 with strong grip on.
+    // Upper clamp of gripper commands: 1.0, or 1.10 with strong grip on.
     double gripper_cmd_max_ = 1.0;
 
     // Slew rate limiter state (RT thread only)

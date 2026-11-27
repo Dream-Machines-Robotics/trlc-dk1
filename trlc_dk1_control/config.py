@@ -126,7 +126,7 @@ class DK1RobotConfig:
     max_gripper_torque_nm: float = 1.0
     # Strong grip (csrc/strong_grip.h): strong_gripper_torque_nm > 0 = on. The
     # gripper current limit is that value (max 3 Nm), gripper commands are
-    # accepted up to 1.15, and the reported position is not clamped at 1.0.
+    # accepted up to 1.10, and the reported position is not clamped at 1.0.
     strong_gripper_torque_nm: float = 0.0
     DM4310_TORQUE_CONSTANT: float = 0.945  # Nm/A
     EMIT_VELOCITY_SCALE: float = 100.0     # rad/s multiplier for EMIT mode
