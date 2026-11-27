@@ -24,7 +24,7 @@ from lerobot.cameras import CameraConfig
 from lerobot.cameras.utils import make_cameras_from_configs
 from lerobot.robots import Robot, RobotConfig
 
-from lerobot_robot_trlc_dk1 import strong_grip, telemetry
+from lerobot_robot_trlc_dk1 import stiff_arm, strong_grip, telemetry
 from lerobot.robots.utils import ensure_safe_goal_position
 from lerobot.utils.errors import DeviceAlreadyConnectedError, DeviceNotConnectedError
 
@@ -197,12 +197,24 @@ class DK1Follower(Robot):
         from trlc_dk1_control.config import DK1RobotConfig
         from trlc_dk1_control.rt_robot import DK1RobotRT
 
+        # Dev toggle stiff-arm-asymmetric (stiff_arm.py): gains and gripper limit per
+        # arm, plus strong grip. None = off: no gains are passed, so the defaults stay.
+        side = stiff_arm.arm_side(self.config.label, self.config.port)
+        stiff = stiff_arm.settings()
         strong_torque = self.config.strong_gripper_torque
         if strong_torque <= 0.0:
             # Dev toggle strong-grip (strong_grip.py), both arms; None = off, unchanged.
-            strong = strong_grip.settings()
+            # Also on under stiff-arm-asymmetric, with this arm's limit.
+            strong = strong_grip.settings(side=side)
             if strong is not None:
                 strong_torque = strong[0]
+        gains = {}
+        if stiff is not None:
+            arm_gains = stiff.gains(side)
+            if arm_gains is not None:
+                gains = {"arm_kp": np.array(arm_gains[0], dtype=np.float64),
+                         "arm_kd": np.array(arm_gains[1], dtype=np.float64)}
+            stiff_arm.log_on(str(self), side, arm_gains, strong_torque)
         # Dev toggle teleop-telemetry (telemetry.py): only in a hub quick teleop
         # session, which names the log folder. None = off, nothing changes.
         log_dir = telemetry.log_dir()
@@ -215,6 +227,7 @@ class DK1Follower(Robot):
             joint_velocity_scaling=self.config.joint_velocity_scaling,
             joint_accel_limits=np.full(6, max(self.config.joint_accel_limit, 0.0)),
             telemetry=log_dir is not None,
+            **gains,
         )
         self._rt_robot = DK1RobotRT(rt_config)
         self._rt_robot.connect()
